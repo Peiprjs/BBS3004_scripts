@@ -9,6 +9,7 @@ This repository analyzes zebrafish MUSCLEMOTION results to summarize heartbeat v
 - Measures time between beats and computes summary metrics.
 - Writes results to `output/hrv_summary.csv` and saves per-sample plots in `output/`.
 - Provides an optional Streamlit dashboard (`python/gui_app.py`) for interactive review.
+- Runs additional statistical tests and writes regression summaries to CSV files in `output/`.
 
 ## How arrhythmia risk is estimated
 
@@ -37,6 +38,23 @@ The output now includes:
 If there are too few IBIs to score reliably, the risk score is set to `NaN` and `Arrhymia` is conservatively set to `False`.
 
 > This output is a research-oriented signal quality/rhythm irregularity estimate, not a clinical diagnosis.
+
+## Additional statistical outputs
+
+After each run, the script also writes:
+
+- `output/linear_regression_coefficients.csv`
+- `output/linear_regression_summary.csv`
+- `output/logistic_regression_coefficients.csv`
+- `output/logistic_regression_summary.csv`
+- `output/linear_trend_summary.csv`
+- `output/unsupervised_assignments.csv`
+- `output/unsupervised_cluster_summary.csv`
+- `output/unsupervised_kmeans_centers.csv`
+- `output/unsupervised_pca_loadings.csv`
+- `output/unsupervised_pca_variance.csv`
+
+These summarize linear/logistic regression analyses and unsupervised model outputs (KMeans, hierarchical clustering, PCA) based on the HRV/risk feature set.
 
 ## How to run
 

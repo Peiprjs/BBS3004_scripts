@@ -21,8 +21,11 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.cluster.vq import kmeans2
+from scipy.optimize import minimize
 from scipy.signal import find_peaks
-from scipy.stats import ttest_rel
+from scipy.stats import linregress, norm, t as student_t, ttest_rel
 
 
 SUMMARY_COLUMNS = [
@@ -42,6 +45,16 @@ ARRHYTHMIA_DEFAULT_THRESHOLD = 0.5
 ARRHYTHMIA_MIN_IBI_FOR_SCORE = 3
 ARRHYTHMIA_MIN_IBI_FOR_CONFIDENT_DECISION = 6
 CONTROL_CONCENTRATION = "0"
+UNSUPERVISED_FEATURE_COLUMNS = [
+    "n_peaks",
+    "mean_ibi_ms",
+    "sdnn_ms",
+    "rmssd_ms",
+    "cv_ibi",
+    "pnn50",
+    "mean_hr_bpm",
+    "arrhythmia_risk_score",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +376,386 @@ def add_control_pvalues(full_df):
 
 
 # ---------------------------------------------------------------------------
+# Additional statistical tests
+# ---------------------------------------------------------------------------
+
+def _prepare_regression_predictors(summary_df):
+    """Prepare regression-ready table and design matrix from summary outputs."""
+    df = summary_df.copy()
+    df["concentration_numeric"] = pd.to_numeric(df["concentration"], errors="coerce")
+    df = df.dropna(subset=["concentration_numeric", "arrhythmia_risk_score", "Arrhymia"])
+    if df.empty:
+        return df, pd.DataFrame()
+
+    predictors = pd.DataFrame(
+        {"concentration_numeric": df["concentration_numeric"].astype(float).to_numpy()},
+        index=df.index,
+    )
+    exposure_dummies = pd.get_dummies(
+        df["exposure"].astype(str),
+        prefix="exposure",
+        drop_first=True,
+        dtype=float,
+    )
+    predictors = pd.concat([predictors, exposure_dummies], axis=1)
+    return df, predictors
+
+
+def _fit_linear_regression(y, predictors):
+    """Fit OLS and return coefficient table + model summary."""
+    X_no_intercept = np.asarray(predictors, dtype=float)
+    y = np.asarray(y, dtype=float)
+    X = np.column_stack([np.ones(len(y)), X_no_intercept])
+    terms = ["intercept"] + list(predictors.columns)
+
+    beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+    y_hat = X @ beta
+    residuals = y - y_hat
+    n_samples, n_params = X.shape
+    dof = n_samples - n_params
+
+    rss = float(np.sum(residuals ** 2))
+    tss = float(np.sum((y - np.mean(y)) ** 2))
+    r_squared = np.nan if tss <= 0 else 1.0 - (rss / tss)
+
+    if dof > 0:
+        xtx_inv = np.linalg.pinv(X.T @ X)
+        sigma2 = rss / dof
+        covariance = sigma2 * xtx_inv
+        std_error = np.sqrt(np.maximum(np.diag(covariance), 0.0))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t_stat = np.where(std_error > 0, beta / std_error, np.nan)
+        p_value = 2.0 * student_t.sf(np.abs(t_stat), df=dof)
+    else:
+        std_error = np.full(len(beta), np.nan)
+        t_stat = np.full(len(beta), np.nan)
+        p_value = np.full(len(beta), np.nan)
+
+    coef_df = pd.DataFrame(
+        {
+            "term": terms,
+            "coefficient": beta,
+            "std_error": std_error,
+            "t_statistic": t_stat,
+            "p_value": p_value,
+        }
+    )
+    summary_df = pd.DataFrame(
+        [
+            {
+                "model": "linear_regression",
+                "n_samples": n_samples,
+                "n_parameters": n_params,
+                "dof": dof,
+                "r_squared": r_squared,
+                "rss": rss,
+            }
+        ]
+    )
+    return coef_df, summary_df
+
+
+def _fit_logistic_regression(y, predictors):
+    """Fit logistic regression via MLE and return coefficients + summary."""
+    y = np.asarray(y, dtype=float)
+    X_no_intercept = np.asarray(predictors, dtype=float)
+    X = np.column_stack([np.ones(len(y)), X_no_intercept])
+    terms = ["intercept"] + list(predictors.columns)
+    n_samples, n_params = X.shape
+
+    if len(np.unique(y)) < 2:
+        empty_coef = pd.DataFrame(
+            {
+                "term": terms,
+                "coefficient": np.nan,
+                "std_error": np.nan,
+                "z_statistic": np.nan,
+                "p_value": np.nan,
+                "odds_ratio": np.nan,
+            }
+        )
+        summary = pd.DataFrame(
+            [
+                {
+                    "model": "logistic_regression",
+                    "n_samples": n_samples,
+                    "n_parameters": n_params,
+                    "converged": False,
+                    "status": "single_class_outcome",
+                    "accuracy_at_0_5": np.nan,
+                    "mcfadden_pseudo_r2": np.nan,
+                    "log_likelihood": np.nan,
+                }
+            ]
+        )
+        return empty_coef, summary
+
+    def _sigmoid(z):
+        z = np.clip(z, -500, 500)
+        return 1.0 / (1.0 + np.exp(-z))
+
+    def _negative_log_likelihood(beta):
+        p = np.clip(_sigmoid(X @ beta), 1e-9, 1.0 - 1e-9)
+        return -np.sum(y * np.log(p) + (1.0 - y) * np.log(1.0 - p))
+
+    result = minimize(
+        _negative_log_likelihood,
+        x0=np.zeros(n_params, dtype=float),
+        method="BFGS",
+    )
+
+    beta = result.x
+    covariance = np.asarray(result.hess_inv) if hasattr(result, "hess_inv") else np.full((n_params, n_params), np.nan)
+    if covariance.shape != (n_params, n_params):
+        covariance = np.full((n_params, n_params), np.nan)
+
+    std_error = np.sqrt(np.maximum(np.diag(covariance), 0.0))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z_stat = np.where(std_error > 0, beta / std_error, np.nan)
+    p_value = 2.0 * norm.sf(np.abs(z_stat))
+    odds_ratio = np.exp(beta)
+
+    p_hat = _sigmoid(X @ beta)
+    accuracy = float(np.mean((p_hat >= 0.5).astype(float) == y))
+    ll_model = -float(_negative_log_likelihood(beta))
+    p_null = float(np.clip(np.mean(y), 1e-9, 1.0 - 1e-9))
+    ll_null = float(np.sum(y * np.log(p_null) + (1.0 - y) * np.log(1.0 - p_null)))
+    pseudo_r2 = np.nan if ll_null == 0 else 1.0 - (ll_model / ll_null)
+
+    coef_df = pd.DataFrame(
+        {
+            "term": terms,
+            "coefficient": beta,
+            "std_error": std_error,
+            "z_statistic": z_stat,
+            "p_value": p_value,
+            "odds_ratio": odds_ratio,
+        }
+    )
+    summary_df = pd.DataFrame(
+        [
+            {
+                "model": "logistic_regression",
+                "n_samples": n_samples,
+                "n_parameters": n_params,
+                "converged": bool(result.success),
+                "status": result.message,
+                "accuracy_at_0_5": accuracy,
+                "mcfadden_pseudo_r2": pseudo_r2,
+                "log_likelihood": ll_model,
+            }
+        ]
+    )
+    return coef_df, summary_df
+
+
+def run_additional_statistical_tests(summary_df, output_dir):
+    """Run additional statistical tests and save regression outputs."""
+    prepared_df, predictors = _prepare_regression_predictors(summary_df)
+    if prepared_df.empty or predictors.empty:
+        return {}
+
+    linear_coef_df, linear_summary_df = _fit_linear_regression(
+        prepared_df["arrhythmia_risk_score"].to_numpy(dtype=float),
+        predictors,
+    )
+    logistic_coef_df, logistic_summary_df = _fit_logistic_regression(
+        prepared_df["Arrhymia"].astype(float).to_numpy(),
+        predictors,
+    )
+
+    trend = linregress(
+        prepared_df["concentration_numeric"].to_numpy(dtype=float),
+        prepared_df["arrhythmia_risk_score"].to_numpy(dtype=float),
+    )
+    trend_df = pd.DataFrame(
+        [
+            {
+                "model": "simple_linear_trend",
+                "slope": trend.slope,
+                "intercept": trend.intercept,
+                "r_value": trend.rvalue,
+                "p_value": trend.pvalue,
+                "std_err": trend.stderr,
+            }
+        ]
+    )
+
+    linear_coef_path = os.path.join(output_dir, "linear_regression_coefficients.csv")
+    linear_summary_path = os.path.join(output_dir, "linear_regression_summary.csv")
+    logistic_coef_path = os.path.join(output_dir, "logistic_regression_coefficients.csv")
+    logistic_summary_path = os.path.join(output_dir, "logistic_regression_summary.csv")
+    trend_path = os.path.join(output_dir, "linear_trend_summary.csv")
+
+    linear_coef_df.to_csv(linear_coef_path, index=False)
+    linear_summary_df.to_csv(linear_summary_path, index=False)
+    logistic_coef_df.to_csv(logistic_coef_path, index=False)
+    logistic_summary_df.to_csv(logistic_summary_path, index=False)
+    trend_df.to_csv(trend_path, index=False)
+
+    return {
+        "linear_regression_coefficients": linear_coef_path,
+        "linear_regression_summary": linear_summary_path,
+        "logistic_regression_coefficients": logistic_coef_path,
+        "logistic_regression_summary": logistic_summary_path,
+        "linear_trend_summary": trend_path,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Unsupervised learning models
+# ---------------------------------------------------------------------------
+
+def _standardize_with_median_imputation(feature_df):
+    """Median-impute then standardize numeric features."""
+    medians = feature_df.median(axis=0, numeric_only=True)
+    filled = feature_df.fillna(medians)
+    means = filled.mean(axis=0, numeric_only=True)
+    stds = filled.std(axis=0, ddof=0, numeric_only=True).replace(0.0, 1.0)
+    standardized = (filled - means) / stds
+    return standardized, medians, means, stds
+
+
+def _compute_pca_from_standardized(X, n_components=2):
+    """Compute PCA scores/loadings from standardized feature matrix."""
+    if X.shape[0] < 2 or X.shape[1] < 1:
+        return np.empty((X.shape[0], 0)), np.empty((0, X.shape[1])), np.array([])
+
+    max_components = min(n_components, X.shape[1], X.shape[0])
+    centered = X - np.mean(X, axis=0)
+    _, singular_values, vt = np.linalg.svd(centered, full_matrices=False)
+    components = vt[:max_components]
+    scores = centered @ components.T
+
+    if X.shape[0] > 1:
+        variance = (singular_values ** 2) / (X.shape[0] - 1)
+    else:
+        variance = np.zeros_like(singular_values)
+    total_variance = np.sum(variance)
+    explained_ratio = (
+        variance[:max_components] / total_variance
+        if total_variance > 0
+        else np.zeros(max_components, dtype=float)
+    )
+    return scores, components, explained_ratio
+
+
+def run_unsupervised_models(summary_df, output_dir):
+    """Run unsupervised models (KMeans, hierarchical clustering, PCA)."""
+    available_features = [
+        col for col in UNSUPERVISED_FEATURE_COLUMNS
+        if col in summary_df.columns
+    ]
+    if not available_features:
+        return {}
+
+    feature_df = summary_df[available_features].apply(pd.to_numeric, errors="coerce")
+    standardized_df, _, _, _ = _standardize_with_median_imputation(feature_df)
+    X = standardized_df.to_numpy(dtype=float)
+    n_samples = X.shape[0]
+    if n_samples < 2:
+        return {}
+
+    assignments_df = summary_df[
+        ["sample", "exposure", "concentration", "Arrhymia", "arrhythmia_risk_score"]
+    ].copy()
+    assignments_df["concentration"] = assignments_df["concentration"].astype(str)
+
+    cluster_columns = []
+    centers_rows = []
+    np.random.seed(42)
+    for k in (2, 3):
+        if n_samples < k:
+            continue
+        try:
+            centers, labels = kmeans2(X, k, minit="++", iter=100)
+        except Exception:
+            continue
+
+        col = f"cluster_kmeans_k{k}"
+        assignments_df[col] = labels + 1
+        cluster_columns.append(col)
+
+        for cluster_idx, center in enumerate(centers, start=1):
+            centers_rows.append(
+                {
+                    "model": col,
+                    "cluster_id": cluster_idx,
+                    **{
+                        f"z_{feature}": float(center[i])
+                        for i, feature in enumerate(available_features)
+                    },
+                }
+            )
+
+    try:
+        hierarchical = linkage(X, method="ward")
+        hierarchical_labels = fcluster(hierarchical, t=2, criterion="maxclust")
+        hierarchical_col = "cluster_hierarchical_k2"
+        assignments_df[hierarchical_col] = hierarchical_labels
+        cluster_columns.append(hierarchical_col)
+    except Exception:
+        pass
+
+    scores, components, explained_ratio = _compute_pca_from_standardized(X, n_components=2)
+    if scores.shape[1] >= 1:
+        assignments_df["pca_pc1"] = scores[:, 0]
+    if scores.shape[1] >= 2:
+        assignments_df["pca_pc2"] = scores[:, 1]
+
+    pca_loadings_df = pd.DataFrame({"feature": available_features})
+    if components.shape[0] >= 1:
+        pca_loadings_df["pc1_loading"] = components[0, :]
+    if components.shape[0] >= 2:
+        pca_loadings_df["pc2_loading"] = components[1, :]
+
+    pca_variance_df = pd.DataFrame(
+        [
+            {
+                "component": f"PC{i + 1}",
+                "explained_variance_ratio": explained_ratio[i] if i < len(explained_ratio) else np.nan,
+            }
+            for i in range(max(2, len(explained_ratio)))
+        ]
+    )
+
+    cluster_summary_rows = []
+    for cluster_col in cluster_columns:
+        for cluster_id, cluster_group in assignments_df.groupby(cluster_col):
+            cluster_summary_rows.append(
+                {
+                    "model": cluster_col,
+                    "cluster_id": int(cluster_id),
+                    "n_samples": int(len(cluster_group)),
+                    "arrhythmia_rate": float(cluster_group["Arrhymia"].astype(float).mean()),
+                    "mean_arrhythmia_risk_score": float(cluster_group["arrhythmia_risk_score"].mean()),
+                }
+            )
+    cluster_summary_df = pd.DataFrame(cluster_summary_rows)
+    centers_df = pd.DataFrame(centers_rows)
+
+    assignments_path = os.path.join(output_dir, "unsupervised_assignments.csv")
+    cluster_summary_path = os.path.join(output_dir, "unsupervised_cluster_summary.csv")
+    pca_loadings_path = os.path.join(output_dir, "unsupervised_pca_loadings.csv")
+    pca_variance_path = os.path.join(output_dir, "unsupervised_pca_variance.csv")
+    cluster_centers_path = os.path.join(output_dir, "unsupervised_kmeans_centers.csv")
+
+    assignments_df.to_csv(assignments_path, index=False)
+    cluster_summary_df.to_csv(cluster_summary_path, index=False)
+    pca_loadings_df.to_csv(pca_loadings_path, index=False)
+    pca_variance_df.to_csv(pca_variance_path, index=False)
+    centers_df.to_csv(cluster_centers_path, index=False)
+
+    return {
+        "unsupervised_assignments": assignments_path,
+        "unsupervised_cluster_summary": cluster_summary_path,
+        "unsupervised_pca_loadings": pca_loadings_path,
+        "unsupervised_pca_variance": pca_variance_path,
+        "unsupervised_kmeans_centers": cluster_centers_path,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Plotting helper
 # ---------------------------------------------------------------------------
 
@@ -578,7 +971,13 @@ def run_analysis(
     df = full_df[SUMMARY_COLUMNS]
     csv_path = os.path.join(output_dir, "hrv_summary.csv")
     df.to_csv(csv_path, index=False)
+    stats_paths = run_additional_statistical_tests(df, output_dir)
+    unsupervised_paths = run_unsupervised_models(df, output_dir)
     print(f"\nSummary saved to {csv_path}")
+    for label, path in stats_paths.items():
+        print(f"{label} saved to {path}")
+    for label, path in unsupervised_paths.items():
+        print(f"{label} saved to {path}")
     print(df.to_string(index=False))
 
     return df
