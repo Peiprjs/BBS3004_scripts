@@ -52,6 +52,8 @@ VARIABLE_GLOSSARY_MARKDOWN = """
 - `arrhythmia_ibi_count`: number of IBIs used.
 - `arrhythmia_threshold`: cutoff used for binary decision.
 - `Arrhymia`: boolean decision from risk score and threshold.
+- `snr`: Signal-to-Noise Ratio (dB) estimated from the contraction signal.
+- `baseline_drift`: maximum variation in the contraction signal's baseline.
 - `paired_ttest_pvalue_vs_control0_mean_ibi`: paired t-test p-value vs concentration-0 control mean IBI profile (same exposure).
 - `cluster_*`: unsupervised cluster labels from KMeans/hierarchical clustering.
 - `pca_pc1`, `pca_pc2`: first two PCA component scores.
@@ -98,6 +100,8 @@ def _pretty_metric_label(name):
         "cv_ibi": "Coefficient of variation of inter-beat interval",
         "pnn50": "Percentage of successive interval differences greater than 50 ms (%)",
         "mean_hr_bpm": "Mean heart rate (beats per minute)",
+        "snr": "Signal-to-Noise Ratio (dB)",
+        "baseline_drift": "Baseline drift",
     }
     return label_map.get(name, name.replace("_", " "))
 

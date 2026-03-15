@@ -39,12 +39,15 @@ SUMMARY_COLUMNS = [
     "arrhythmia_ibi_count", "arrhythmia_threshold",
     "paired_ttest_pvalue_vs_control0_mean_ibi",
     "Arrhymia",
+    "snr", "baseline_drift",
 ]
 ROLLING_RMSSD_WINDOW = 5
 ARRHYTHMIA_DEFAULT_THRESHOLD = 0.5
 ARRHYTHMIA_MIN_IBI_FOR_SCORE = 3
 ARRHYTHMIA_MIN_IBI_FOR_CONFIDENT_DECISION = 6
 CONTROL_CONCENTRATION = "0"
+PEAK_PROMINENCE_OUTLIER_RATIO_THRESHOLD = 2.0
+PEAK_PROMINENCE_TRIM_PERCENTILES = (1.0, 99.0)
 UNSUPERVISED_FEATURE_COLUMNS = [
     "n_peaks",
     "mean_ibi_ms",
@@ -54,6 +57,8 @@ UNSUPERVISED_FEATURE_COLUMNS = [
     "pnn50",
     "mean_hr_bpm",
     "arrhythmia_risk_score",
+    "snr",
+    "baseline_drift",
 ]
 
 
@@ -117,11 +122,77 @@ def _rolling_median(values, window_samples):
     )
 
 
+def compute_signal_quality(time_ms, signal, baseline_window_ms=800.0, smoothing_window_ms=50.0):
+    """Compute Signal-to-Noise Ratio (SNR) and baseline drift.
+
+    Parameters
+    ----------
+    time_ms : array-like
+        Time axis in milliseconds.
+    signal : array-like
+        Contraction signal values.
+    baseline_window_ms : float
+        Window size for rolling-median baseline estimation.
+    smoothing_window_ms : float
+        Window size for rolling-mean signal smoothing to estimate noise.
+
+    Returns
+    -------
+    dict with keys:
+        snr : float
+            Estimated Signal-to-Noise Ratio in dB.
+        baseline_drift : float
+            Maximum variation of the estimated baseline.
+    """
+    time_ms = np.asarray(time_ms, dtype=float)
+    signal = np.asarray(signal, dtype=float)
+
+    if len(time_ms) < 3 or len(signal) < 3:
+        return {"snr": np.nan, "baseline_drift": np.nan}
+
+    dt = np.median(np.diff(time_ms))
+    if not np.isfinite(dt) or dt <= 0:
+        return {"snr": np.nan, "baseline_drift": np.nan}
+
+    # Baseline drift
+    baseline_samples = max(3, int(baseline_window_ms / dt))
+    if baseline_samples % 2 == 0:
+        baseline_samples += 1
+
+    baseline = _rolling_median(signal, baseline_samples)
+    baseline_drift = float(np.max(baseline) - np.min(baseline))
+
+    # SNR calculation
+    # Signal power is variance of original signal
+    signal_power = np.var(signal)
+
+    # Noise is original signal minus smoothed version
+    smooth_samples = max(3, int(smoothing_window_ms / dt))
+    if smooth_samples % 2 == 0:
+        smooth_samples += 1
+
+    smoothed_signal = (
+        pd.Series(signal)
+        .rolling(window=smooth_samples, center=True, min_periods=1)
+        .mean()
+        .to_numpy(dtype=float)
+    )
+    noise = signal - smoothed_signal
+    noise_power = np.var(noise)
+
+    if noise_power > 0:
+        snr = float(10 * np.log10(signal_power / noise_power))
+    else:
+        snr = np.nan
+
+    return {"snr": snr, "baseline_drift": baseline_drift}
+
+
 def detect_peaks(
     time_ms,
     signal,
     prominence_factor=0.3,
-    distance_ms=200.0,
+    distance_ms=140.0,
     baseline_window_ms=800.0,
 ):
     """Detect contraction peaks in the signal.
@@ -167,7 +238,18 @@ def detect_peaks(
     if not np.isfinite(detrended_range) or detrended_range <= 0:
         return np.array([], dtype=int), np.array([], dtype=float)
 
-    prominence = max(np.finfo(float).eps, prominence_factor * detrended_range)
+    lower_q, upper_q = PEAK_PROMINENCE_TRIM_PERCENTILES
+    detrended_trimmed_range = np.percentile(detrended_signal, upper_q) - np.percentile(detrended_signal, lower_q)
+    if not np.isfinite(detrended_trimmed_range) or detrended_trimmed_range <= 0:
+        detrended_trimmed_range = detrended_range
+
+    outlier_ratio = detrended_range / max(detrended_trimmed_range, np.finfo(float).eps)
+    if outlier_ratio > PEAK_PROMINENCE_OUTLIER_RATIO_THRESHOLD:
+        spread_for_prominence = detrended_trimmed_range
+    else:
+        spread_for_prominence = detrended_range
+
+    prominence = max(np.finfo(float).eps, prominence_factor * spread_for_prominence)
 
     peak_indices, _ = find_peaks(
         detrended_signal, prominence=prominence, distance=distance_samples
@@ -813,24 +895,24 @@ def run_unsupervised_models(summary_df, output_dir):
 
 def plot_contraction_with_peaks(time_ms, signal, peak_indices, peak_times,
                                 ibi_ms, sample_label, output_path):
-    """Save a figure showing the contraction signal with detected peaks and IBIs."""
+    """Save a figure showing the contraction signal, detected peaks, and intervals."""
     fig, axes = plt.subplots(2, 1, figsize=(12, 7), gridspec_kw={"height_ratios": [3, 1]})
 
     # Top: contraction + peaks
     ax = axes[0]
     ax.plot(time_ms / 1000, signal, linewidth=0.7, label="Contraction")
     ax.plot(peak_times / 1000, signal[peak_indices], "rv", markersize=8, label="Peaks")
-    ax.set_ylabel("Contraction (a.u.)")
-    ax.set_title(f"Contraction with Detected Peaks – {sample_label}")
+    ax.set_ylabel("Contraction amplitude (a.u.)")
+    ax.set_title(f"Contraction with detected peaks - {sample_label}")
     ax.legend(loc="upper right")
 
-    # Bottom: IBI
+    # Bottom: inter-beat intervals
     ax2 = axes[1]
     if len(ibi_ms) > 0:
         ax2.plot(peak_times[1:] / 1000, ibi_ms, "o-", markersize=4)
     ax2.set_xlabel("Time (s)")
-    ax2.set_ylabel("IBI (ms)")
-    ax2.set_title("Inter-Beat Intervals")
+    ax2.set_ylabel("Inter-beat interval (ms)")
+    ax2.set_title("Inter-beat intervals over recording time")
 
     plt.tight_layout()
     fig.savefig(output_path, dpi=150)
@@ -864,9 +946,9 @@ def analyse_sample_timeseries(
     time_ms, signal = load_tsv(contraction_file)
 
     peak_indices, peak_times = detect_peaks(time_ms, signal)
-    if len(peak_times) < 2:
+    if len(peak_times) < 5:
         if verbose:
-            print(f"  [WARN] Fewer than 2 peaks detected in {folder_name}")
+            print(f"  [WARN] Fewer than 5 peaks detected in {folder_name}")
         return None
 
     ibi_ms = compute_ibi(peak_times)
@@ -879,6 +961,7 @@ def analyse_sample_timeseries(
         arrhythmia_threshold,
         arrhythmia["arrhythmia_data_sufficient"],
     )
+    quality = compute_signal_quality(time_ms, signal)
     sample_label = f"{meta['exposure']}_{meta['concentration']}_{meta['well']}.{meta['fish']}"
 
     instantaneous_hr = np.where(ibi_ms > 0, 60000.0 / ibi_ms, np.nan)
@@ -916,6 +999,7 @@ def analyse_sample_timeseries(
         "arrhythmia_threshold": float(arrhythmia_threshold),
         "paired_ttest_pvalue_vs_control0_mean_ibi": np.nan,
         "Arrhymia": arr_decision,
+        **quality,
     }
 
 
@@ -934,6 +1018,28 @@ def analyse_sample(
         verbose=True,
     )
     if sample_data is None:
+        # Keep summary behavior unchanged, but still export a peak-detection image
+        # when a valid sample has too few detected peaks for metric computation.
+        if output_dir is not None:
+            folder_name = os.path.basename(folder_path)
+            meta = parse_folder_name(folder_name)
+            contraction_file = os.path.join(folder_path, "contraction.txt")
+            if meta is not None and os.path.isfile(contraction_file):
+                time_ms, signal = load_tsv(contraction_file)
+                peak_indices, peak_times = detect_peaks(time_ms, signal)
+                ibi_ms = compute_ibi(peak_times) if len(peak_times) >= 2 else np.array([], dtype=float)
+                sample_label = f"{meta['exposure']}_{meta['concentration']}_{meta['well']}.{meta['fish']}"
+                os.makedirs(output_dir, exist_ok=True)
+                plot_path = os.path.join(output_dir, f"{sample_label}_hrv.png")
+                plot_contraction_with_peaks(
+                    np.asarray(time_ms, dtype=float),
+                    np.asarray(signal, dtype=float),
+                    np.asarray(peak_indices, dtype=int),
+                    np.asarray(peak_times, dtype=float),
+                    np.asarray(ibi_ms, dtype=float),
+                    sample_label,
+                    plot_path,
+                )
         return None
 
     if output_dir is not None:
