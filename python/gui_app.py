@@ -319,20 +319,13 @@ def main():
     default_results = os.path.abspath(os.path.join(script_dir, "..", "MM_Results"))
     default_output = os.path.abspath(os.path.join(script_dir, "..", "output"))
 
-    results_dir = default_results
-    output_dir = default_output
-    st.sidebar.markdown("DOI: [10.5281/zenodo.19038805](https://doi.org/10.5281/zenodo.19038805)")
-    
-    with st.sidebar.expander("Variables & abbreviations", expanded=False):
-        st.markdown(VARIABLE_GLOSSARY_MARKDOWN)
-    with st.sidebar.expander("Data source (advanced)", expanded=False):
-        results_dir = st.text_input("MM_Results folder", default_results)
-        output_dir = st.text_input("Output folder", default_output)
-        if st.button("Reload data"):
-            st.cache_data.clear()
+    if "results_dir" not in st.session_state:
+        st.session_state["results_dir"] = default_results
+    if "output_dir" not in st.session_state:
+        st.session_state["output_dir"] = default_output
 
-    results_dir = os.path.abspath(results_dir)
-    output_dir = os.path.abspath(output_dir)
+    results_dir = os.path.abspath(st.session_state["results_dir"])
+    output_dir = os.path.abspath(st.session_state["output_dir"])
     try:
         records, summary_df = _load_dashboard_data(results_dir)
     except Exception as exc:
@@ -364,6 +357,20 @@ def main():
 
     sample_options = filtered_df["sample"].tolist()
     selected_sample = st.sidebar.selectbox("Fish sample", sample_options)
+    with st.sidebar.expander("Variables & abbreviations", expanded=False):
+        st.markdown(VARIABLE_GLOSSARY_MARKDOWN)
+    with st.sidebar.expander("Settings", expanded=False):
+        st.caption("Data source")
+        st.text_input("MM_Results folder", key="results_dir")
+        st.text_input("Output folder", key="output_dir")
+        if st.button("Reload data"):
+            st.cache_data.clear()
+    output_dir = os.path.abspath(st.session_state["output_dir"])
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(
+        "[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19038805.svg)]"
+        "(https://doi.org/10.5281/zenodo.19038805)"
+    )
 
     filtered_records = [record_by_sample[sample] for sample in sample_options if sample in record_by_sample]
     model_tables = _load_model_output_tables(output_dir)
