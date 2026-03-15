@@ -32,7 +32,7 @@ SUMMARY_COLUMNS = [
     "sample", "exposure", "concentration", "well", "fish",
     "n_peaks", "mean_ibi_ms", "sdnn_ms", "rmssd_ms",
     "cv_ibi", "pnn50", "mean_hr_bpm",
-    "arrhythmia_risk_score", "arrhythmia_probability",
+    "arrhythmia_risk_score",
     "arrhythmia_score_cv", "arrhythmia_score_rmssd", "arrhythmia_score_outlier",
     "arrhythmia_outlier_fraction",
     "arrhythmia_data_sufficient", "arrhythmia_quality_flag",
@@ -280,7 +280,6 @@ def compute_arrhythmia_risk(ibi_ms):
     n_ibi = int(len(ibi))
     empty_result = {
         "arrhythmia_risk_score": np.nan,
-        "arrhythmia_probability": np.nan,  # compatibility alias
         "arrhythmia_score_cv": np.nan,
         "arrhythmia_score_rmssd": np.nan,
         "arrhythmia_score_outlier": np.nan,
@@ -322,7 +321,6 @@ def compute_arrhythmia_risk(ibi_ms):
     )
     return {
         "arrhythmia_risk_score": risk_score,
-        "arrhythmia_probability": risk_score,  # compatibility alias
         "arrhythmia_score_cv": float(score_cv),
         "arrhythmia_score_rmssd": float(score_rmssd),
         "arrhythmia_score_outlier": float(score_outlier),
@@ -331,11 +329,6 @@ def compute_arrhythmia_risk(ibi_ms):
         "arrhythmia_quality_flag": quality_flag,
         "arrhythmia_ibi_count": n_ibi,
     }
-
-
-def arrhythmia_probability(ibi_ms):
-    """Compatibility wrapper for the heuristic arrhythmia risk score."""
-    return compute_arrhythmia_risk(ibi_ms)["arrhythmia_probability"]
 
 
 def arrhythmia_decision(risk_score, threshold, data_sufficient):

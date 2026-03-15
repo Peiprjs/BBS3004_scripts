@@ -23,7 +23,6 @@ Each of these three signals is converted to a 0-to-1 score and then averaged int
 
 - A value closer to **1** means more irregular rhythm.
 - A value closer to **0** means more regular rhythm.
-- `arrhythmia_probability` is kept as a compatibility alias of `arrhythmia_risk_score`.
 - The `Arrhymia` column is `True` when score `> arrhythmia_threshold` (default: `0.5`).
 
 ### Data sufficiency and quality flags

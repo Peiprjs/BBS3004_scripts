@@ -44,7 +44,6 @@ VARIABLE_GLOSSARY_MARKDOWN = """
 - `pnn50` (pNN50): percent of successive IBI differences > 50 ms.
 - `mean_hr_bpm`: mean heart rate in beats per minute.
 - `arrhythmia_risk_score`: heuristic irregularity score (0 to 1; higher = more irregular).
-- `arrhythmia_probability`: compatibility alias of `arrhythmia_risk_score`.
 - `arrhythmia_score_cv`, `arrhythmia_score_rmssd`, `arrhythmia_score_outlier`: component scores used to build the risk score.
 - `arrhythmia_outlier_fraction`: fraction of IBIs treated as outliers.
 - `arrhythmia_data_sufficient`: whether enough IBI data were available for scoring.
@@ -91,7 +90,6 @@ def _group_label(record):
 def _pretty_metric_label(name):
     label_map = {
         "arrhythmia_risk_score": "Arrhythmia risk score",
-        "arrhythmia_probability": "Arrhythmia risk score (alias)",
         "mean_ibi_ms": "Mean inter-beat interval (ms)",
         "sdnn_ms": "Standard deviation of inter-beat interval (ms)",
         "rmssd_ms": "Root mean square of successive interval differences (ms)",
@@ -511,7 +509,6 @@ def main():
             preferred_metrics = [
                 "mean_ibi_ms",
                 "arrhythmia_risk_score",
-                "arrhythmia_probability",
             ]
             default_metric = next(
                 (metric_name for metric_name in preferred_metrics if metric_name in numeric_cols),
