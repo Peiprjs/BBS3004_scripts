@@ -65,6 +65,12 @@ pip install -r requirements.txt
 python data_analysis.py --results_dir ../MM_Results --output_dir ../output --arrhythmia_threshold 0.5
 ```
 
+To exclude specific cases from CLI analysis output, pass sample labels with `--exclude_samples`:
+
+```bash
+python data_analysis.py --results_dir ../MM_Results --output_dir ../output --exclude_samples Phe_100_2.1,Terf_30_1.2
+```
+
 Optional dashboard:
 
 ```bash

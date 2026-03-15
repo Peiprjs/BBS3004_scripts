@@ -89,6 +89,11 @@ def parse_folder_name(folder_name):
     }
 
 
+def format_sample_label(meta):
+    """Build canonical sample label from parsed folder metadata."""
+    return f"{meta['exposure']}_{meta['concentration']}_{meta['well']}.{meta['fish']}"
+
+
 def load_tsv(filepath):
     """Load a two-column, tab-separated MUSCLEMOTION output file.
 
@@ -1071,7 +1076,7 @@ def analyse_sample_timeseries(
         arrhythmia["arrhythmia_data_sufficient"],
     )
     quality = compute_signal_quality(time_ms, signal)
-    sample_label = f"{meta['exposure']}_{meta['concentration']}_{meta['well']}.{meta['fish']}"
+    sample_label = format_sample_label(meta)
 
     instantaneous_hr = np.where(ibi_ms > 0, 60000.0 / ibi_ms, np.nan)
     rolling_rmssd = compute_rolling_rmssd(ibi_ms, window=ROLLING_RMSSD_WINDOW)
@@ -1138,7 +1143,7 @@ def analyse_sample(
                 time_ms, signal = load_tsv(contraction_file)
                 peak_indices, peak_times, sawtooth_peak = detect_peaks(time_ms, signal)
                 ibi_ms = compute_ibi(peak_times) if len(peak_times) >= 2 else np.array([], dtype=float)
-                sample_label = f"{meta['exposure']}_{meta['concentration']}_{meta['well']}.{meta['fish']}"
+                sample_label = format_sample_label(meta)
                 os.makedirs(output_dir, exist_ok=True)
                 plot_path = os.path.join(output_dir, f"{sample_label}_hrv.png")
                 plot_contraction_with_peaks(
@@ -1175,6 +1180,7 @@ def analyse_sample(
 def load_all_sample_timeseries(
     results_dir,
     arrhythmia_threshold=ARRHYTHMIA_DEFAULT_THRESHOLD,
+    exclude_samples=None,
     verbose=False,
 ):
     """Load detailed per-sample series for all valid MUSCLEMOTION folders."""
@@ -1185,8 +1191,12 @@ def load_all_sample_timeseries(
     if not folders:
         raise ValueError(f"No MUSCLEMOTION result folders found in {results_dir}")
 
+    excluded = set(exclude_samples or [])
     all_results = []
     for folder_name in tqdm(folders, desc="Loading sample timeseries"):
+        meta = parse_folder_name(folder_name)
+        if meta is not None and format_sample_label(meta) in excluded:
+            continue
         folder_path = os.path.join(results_dir, folder_name)
         result = analyse_sample_timeseries(
             folder_path,
@@ -1206,6 +1216,7 @@ def run_analysis(
     results_dir,
     output_dir,
     arrhythmia_threshold=ARRHYTHMIA_DEFAULT_THRESHOLD,
+    exclude_samples=None,
 ):
     """Iterate over all sample folders in *results_dir* and produce a summary."""
     if not os.path.isdir(results_dir):
@@ -1219,8 +1230,13 @@ def run_analysis(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    excluded = set(exclude_samples or [])
     all_results = []
     for folder_name in tqdm(folders, desc="Analysing folders"):
+        meta = parse_folder_name(folder_name)
+        if meta is not None and format_sample_label(meta) in excluded:
+            tqdm.write(f"  [SKIP] Excluded case: {format_sample_label(meta)}")
+            continue
         folder_path = os.path.join(results_dir, folder_name)
         result = analyse_sample(
             folder_path,
@@ -1283,14 +1299,28 @@ def main():
             "(range: 0 to 1, default: 0.5)"
         ),
     )
+    parser.add_argument(
+        "--exclude_samples",
+        default="",
+        help=(
+            "Comma-separated case/sample labels to exclude from analysis, "
+            "for example: Phe_100_2.1,Terf_30_1.2"
+        ),
+    )
     args = parser.parse_args()
     if not 0.0 <= args.arrhythmia_threshold <= 1.0:
         parser.error("--arrhythmia_threshold must be between 0 and 1.")
+    exclude_samples = [
+        sample.strip()
+        for sample in args.exclude_samples.split(",")
+        if sample.strip()
+    ]
 
     run_analysis(
         os.path.abspath(args.results_dir),
         os.path.abspath(args.output_dir),
         arrhythmia_threshold=args.arrhythmia_threshold,
+        exclude_samples=exclude_samples,
     )
 
 

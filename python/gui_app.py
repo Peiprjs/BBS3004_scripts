@@ -33,6 +33,12 @@ MODEL_OUTPUT_FILES = {
     "unsupervised_pca_variance": "unsupervised_pca_variance.csv",
     "unsupervised_pca_loadings": "unsupervised_pca_loadings.csv",
 }
+DEFAULT_EXCLUDED_CASES = [
+    "Terf_0_1.2",
+    "Phe_100_2.1",
+    "Terf_20_1.2",
+    "Terf_20_2.3",
+]
 VARIABLE_GLOSSARY_MARKDOWN = """
 - `sample`: sample identifier (`Exposure_Concentration_Well.Fish`).
 - `exposure`: treatment family/group (e.g., `Phe`, `Terf`).
@@ -464,13 +470,16 @@ def _render_tab_metrics(filtered_df):
             labels.append(str(name))
 
         if grouped_values:
-            significance_flags, _, significance_label = _group_significance(
+            significance_flags, p_values, significance_label = _group_significance(
                 grouped_values, labels, group_by, alpha=0.05
             )
-            display_labels = [
-                f"{label}*" if is_significant else label
-                for label, is_significant in zip(labels, significance_flags)
-            ]
+            display_labels = []
+            for label, is_significant, p_value in zip(labels, significance_flags, p_values):
+                significance_marker = "*" if is_significant else ""
+                if np.isfinite(p_value):
+                    display_labels.append(f"{label}{significance_marker}\n(p={p_value:.3g})")
+                else:
+                    display_labels.append(f"{label}{significance_marker}\n(p=n/a)")
             fig, ax = plt.subplots(figsize=(10, 4))
             ax.boxplot(
                 grouped_values,
@@ -492,6 +501,7 @@ def _render_tab_metrics(filtered_df):
             ax.set_xlabel(group_label.capitalize())
             ax.set_ylabel(metric_label)
             ax.grid(axis="y", alpha=0.2)
+            ax.tick_params(axis="x", labelsize=8)
             ax.legend(
                 handles=[
                     Patch(facecolor="tab:blue", edgecolor="tab:blue", alpha=0.25, label="IQR (Q1-Q3)"),
@@ -682,6 +692,20 @@ def main():
     filtered_df = filtered_df[
         filtered_df["concentration"].astype(str).isin(selected_concentrations)
     ].copy()
+
+    removable_cases = sorted(filtered_df["sample"].tolist())
+    default_excluded_cases = [
+        sample_name for sample_name in DEFAULT_EXCLUDED_CASES
+        if sample_name in removable_cases
+    ]
+    excluded_cases = st.sidebar.multiselect(
+        "Remove cases",
+        removable_cases,
+        default=default_excluded_cases,
+        help="Exclude selected cases from all current dashboard plots and tables.",
+    )
+    if excluded_cases:
+        filtered_df = filtered_df[~filtered_df["sample"].isin(excluded_cases)].copy()
 
     if filtered_df.empty:
         st.warning("No samples match the selected filters.")
