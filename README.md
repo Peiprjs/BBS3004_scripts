@@ -32,6 +32,7 @@ The output now includes:
 - `arrhythmia_data_sufficient` (`True/False`)
 - `arrhythmia_quality_flag` (`ok`, `low_ibi_count`, or `insufficient_ibi`)
 - `arrhythmia_ibi_count` (number of inter-beat intervals used)
+- `paired_ttest_pvalue_vs_control0_mean_ibi` (paired t-test p-value comparing each sample's IBI profile with the mean concentration-0 control profile within the same exposure)
 
 If there are too few IBIs to score reliably, the risk score is set to `NaN` and `Arrhymia` is conservatively set to `False`.
 

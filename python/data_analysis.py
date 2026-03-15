@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
+from scipy.stats import ttest_rel
 
 
 SUMMARY_COLUMNS = [
@@ -32,12 +33,15 @@ SUMMARY_COLUMNS = [
     "arrhythmia_score_cv", "arrhythmia_score_rmssd", "arrhythmia_score_outlier",
     "arrhythmia_outlier_fraction",
     "arrhythmia_data_sufficient", "arrhythmia_quality_flag",
-    "arrhythmia_ibi_count", "arrhythmia_threshold", "Arrhymia",
+    "arrhythmia_ibi_count", "arrhythmia_threshold",
+    "paired_ttest_pvalue_vs_control0_mean_ibi",
+    "Arrhymia",
 ]
 ROLLING_RMSSD_WINDOW = 5
 ARRHYTHMIA_DEFAULT_THRESHOLD = 0.5
 ARRHYTHMIA_MIN_IBI_FOR_SCORE = 3
 ARRHYTHMIA_MIN_IBI_FOR_CONFIDENT_DECISION = 6
+CONTROL_CONCENTRATION = "0"
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +281,88 @@ def arrhythmia_decision(risk_score, threshold, data_sufficient):
 
 
 # ---------------------------------------------------------------------------
+# Control comparison statistics
+# ---------------------------------------------------------------------------
+
+def _resample_series(values, target_len):
+    """Resample a 1D series to *target_len* points on a normalized index."""
+    series = np.asarray(values, dtype=float)
+    if target_len < 2 or len(series) < 2:
+        return np.array([], dtype=float)
+    if len(series) == target_len:
+        return series
+
+    x_old = np.linspace(0.0, 1.0, len(series))
+    x_new = np.linspace(0.0, 1.0, target_len)
+    return np.interp(x_new, x_old, series)
+
+
+def _paired_ttest_pvalue(sample_values, reference_values):
+    """Return paired t-test p-value for two aligned vectors."""
+    sample = np.asarray(sample_values, dtype=float)
+    reference = np.asarray(reference_values, dtype=float)
+    if len(sample) < 2 or len(reference) < 2:
+        return np.nan
+
+    n = min(len(sample), len(reference))
+    sample = sample[:n]
+    reference = reference[:n]
+    differences = sample - reference
+
+    if np.allclose(differences, 0.0):
+        return 1.0
+    if np.allclose(differences, differences[0]):
+        return 0.0
+
+    _, p_value = ttest_rel(sample, reference, nan_policy="omit")
+    return float(p_value) if np.isfinite(p_value) else np.nan
+
+
+def add_control_pvalues(full_df):
+    """Add per-sample paired t-test p-value vs mean concentration-0 controls.
+
+    Controls are matched within each exposure group.
+    """
+    df = full_df.copy()
+    pvalues = []
+
+    for _, row in df.iterrows():
+        sample_ibi = np.asarray(row["ibi_values_ms"], dtype=float)
+        if len(sample_ibi) < 2:
+            pvalues.append(np.nan)
+            continue
+
+        same_exposure = df[df["exposure"] == row["exposure"]]
+        controls = same_exposure[
+            same_exposure["concentration"].astype(str) == CONTROL_CONCENTRATION
+        ]
+        controls = controls[controls["sample"] != row["sample"]]
+        control_ibi_list = [
+            np.asarray(values, dtype=float)
+            for values in controls["ibi_values_ms"].tolist()
+            if len(values) >= 2
+        ]
+        if not control_ibi_list:
+            pvalues.append(np.nan)
+            continue
+
+        aligned_controls = [
+            _resample_series(control_ibi, len(sample_ibi))
+            for control_ibi in control_ibi_list
+        ]
+        aligned_controls = [arr for arr in aligned_controls if len(arr) == len(sample_ibi)]
+        if not aligned_controls:
+            pvalues.append(np.nan)
+            continue
+
+        control_mean = np.mean(np.vstack(aligned_controls), axis=0)
+        pvalues.append(_paired_ttest_pvalue(sample_ibi, control_mean))
+
+    df["paired_ttest_pvalue_vs_control0_mean_ibi"] = pvalues
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Plotting helper
 # ---------------------------------------------------------------------------
 
@@ -383,6 +469,7 @@ def analyse_sample_timeseries(
         **hrv,
         **arrhythmia,
         "arrhythmia_threshold": float(arrhythmia_threshold),
+        "paired_ttest_pvalue_vs_control0_mean_ibi": np.nan,
         "Arrhymia": arr_decision,
     }
 
@@ -486,7 +573,9 @@ def run_analysis(
         sys.exit(1)
 
     # Build summary DataFrame (exclude per-beat IBI lists for the CSV)
-    df = pd.DataFrame(all_results)[SUMMARY_COLUMNS]
+    full_df = pd.DataFrame(all_results)
+    full_df = add_control_pvalues(full_df)
+    df = full_df[SUMMARY_COLUMNS]
     csv_path = os.path.join(output_dir, "hrv_summary.csv")
     df.to_csv(csv_path, index=False)
     print(f"\nSummary saved to {csv_path}")

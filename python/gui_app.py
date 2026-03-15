@@ -10,6 +10,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+from scipy.stats import ttest_rel
 
 from data_analysis import SUMMARY_COLUMNS, load_all_sample_timeseries
 
@@ -75,6 +78,72 @@ def _aggregate_group_profiles(records, time_key, value_key, n_points=INTERP_POIN
         }
 
     return grid_pct, aggregate
+
+
+def _group_significance(grouped_values, labels, group_by, alpha=0.05):
+    """Return per-group significance flags and legend text for box-plot annotations."""
+    values_list = [np.asarray(values, dtype=float) for values in grouped_values]
+    significance_flags = []
+    p_values = []
+
+    def _paired_ttest_vs_reference(values, reference_values):
+        values = np.asarray(values, dtype=float)
+        reference_values = np.asarray(reference_values, dtype=float)
+        if len(values) < 2 or len(reference_values) < 1:
+            return np.nan
+
+        reference_mean = float(np.mean(reference_values))
+        reference = np.full(values.shape, reference_mean, dtype=float)
+        differences = values - reference
+
+        if np.allclose(differences, 0.0):
+            return 1.0
+        if np.allclose(differences, differences[0]):
+            return 0.0
+
+        _, p_value = ttest_rel(values, reference, nan_policy="omit")
+        return float(p_value) if np.isfinite(p_value) else np.nan
+
+    if group_by == "concentration":
+        baseline_index = next((idx for idx, label in enumerate(labels) if str(label) == "0"), None)
+        if baseline_index is None:
+            return [False] * len(values_list), [np.nan] * len(values_list), "* paired t-test p < 0.05 vs concentration 0 mean"
+
+        baseline_values = values_list[baseline_index]
+        for idx, values in enumerate(values_list):
+            if idx == baseline_index or len(values) < 2 or len(baseline_values) < 2:
+                significance_flags.append(False)
+                p_values.append(np.nan)
+                continue
+
+            p_value = _paired_ttest_vs_reference(values, baseline_values)
+            p_values.append(p_value)
+            significance_flags.append(bool(np.isfinite(p_value) and p_value < alpha))
+
+        return significance_flags, p_values, "* paired t-test p < 0.05 vs concentration 0 mean"
+
+    for idx, values in enumerate(values_list):
+        rest_values = [
+            other_values
+            for j, other_values in enumerate(values_list)
+            if j != idx and len(other_values) > 0
+        ]
+        if len(values) < 2 or not rest_values:
+            significance_flags.append(False)
+            p_values.append(np.nan)
+            continue
+
+        rest = np.concatenate(rest_values)
+        if len(rest) < 2:
+            significance_flags.append(False)
+            p_values.append(np.nan)
+            continue
+
+        p_value = _paired_ttest_vs_reference(values, rest)
+        p_values.append(p_value)
+        significance_flags.append(bool(np.isfinite(p_value) and p_value < alpha))
+
+    return significance_flags, p_values, "* paired t-test p < 0.05 vs rest mean"
 
 
 @st.cache_data(show_spinner=False)
@@ -174,10 +243,11 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     default_results = os.path.abspath(os.path.join(script_dir, "..", "MM_Results"))
 
-    st.sidebar.header("Data source")
-    results_dir = st.sidebar.text_input("MM_Results folder", default_results)
-    if st.sidebar.button("Reload data"):
-        st.cache_data.clear()
+    results_dir = default_results
+    with st.sidebar.expander("Data source (advanced)", expanded=False):
+        results_dir = st.text_input("MM_Results folder", default_results)
+        if st.button("Reload data"):
+            st.cache_data.clear()
 
     results_dir = os.path.abspath(results_dir)
     try:
@@ -279,11 +349,22 @@ def main():
             else:
                 default_metric = numeric_cols[0]
             metric = st.selectbox("Metric distribution", numeric_cols, index=numeric_cols.index(default_metric))
-            group_by = st.selectbox("Group by", ["exposure", "concentration", "Arrhymia"])
+            group_by = st.selectbox("Group by", ["exposure", "concentration"])
 
             grouped_values = []
             labels = []
-            for name, group in filtered_df.groupby(group_by):
+            if group_by == "concentration":
+                grouped_items = sorted(
+                    filtered_df.groupby(group_by),
+                    key=lambda item: _safe_float_sort_key(item[0]),
+                )
+            else:
+                grouped_items = sorted(
+                    filtered_df.groupby(group_by),
+                    key=lambda item: str(item[0]),
+                )
+
+            for name, group in grouped_items:
                 values = group[metric].dropna().to_numpy(dtype=float)
                 if len(values) == 0:
                     continue
@@ -291,11 +372,57 @@ def main():
                 labels.append(str(name))
 
             if grouped_values:
+                significance_flags, _, significance_label = _group_significance(
+                    grouped_values, labels, group_by, alpha=0.05
+                )
+                display_labels = [
+                    f"{label}*" if is_significant else label
+                    for label, is_significant in zip(labels, significance_flags)
+                ]
                 fig, ax = plt.subplots(figsize=(10, 4))
-                ax.boxplot(grouped_values, tick_labels=labels, showmeans=True)
+                ax.boxplot(
+                    grouped_values,
+                    tick_labels=display_labels,
+                    showmeans=True,
+                    patch_artist=True,
+                    boxprops={"facecolor": "tab:blue", "alpha": 0.25, "edgecolor": "tab:blue"},
+                    medianprops={"color": "tab:orange", "linewidth": 1.8},
+                    meanprops={
+                        "marker": "D",
+                        "markerfacecolor": "tab:green",
+                        "markeredgecolor": "tab:green",
+                        "markersize": 5,
+                    },
+                )
                 ax.set_title(f"{metric} grouped by {group_by}")
                 ax.set_ylabel(metric)
                 ax.grid(axis="y", alpha=0.2)
+                ax.legend(
+                    handles=[
+                        Patch(facecolor="tab:blue", edgecolor="tab:blue", alpha=0.25, label="IQR (Q1-Q3)"),
+                        Line2D([0], [0], color="tab:orange", lw=1.8, label="Median"),
+                        Line2D(
+                            [0],
+                            [0],
+                            marker="D",
+                            color="tab:green",
+                            markerfacecolor="tab:green",
+                            linestyle="None",
+                            label="Mean",
+                        ),
+                        Line2D(
+                            [0],
+                            [0],
+                            marker="*",
+                            color="crimson",
+                            markerfacecolor="crimson",
+                            linestyle="None",
+                            label=significance_label,
+                        ),
+                    ],
+                    loc="best",
+                    fontsize=8,
+                )
                 plt.xticks(rotation=30, ha="right")
                 plt.tight_layout()
                 st.pyplot(fig)
