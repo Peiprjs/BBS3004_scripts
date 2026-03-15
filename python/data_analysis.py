@@ -277,6 +277,26 @@ def detect_peaks(
         return np.array([], dtype=int), np.array([], dtype=float), np.array([], dtype=bool)
 
     # Group sawtooth peaks
+    # Use a data-driven constraint on the grouping window so we do not
+    # merge distinct heartbeats when their true inter-beat interval is
+    # shorter than the default sawtooth_group_distance_ms.
+    effective_group_distance_ms = sawtooth_group_distance_ms
+    max_group_span_ms = None
+    if len(peak_indices) > 1:
+        peak_times_ms = time_ms[peak_indices]
+        ibis = np.diff(peak_times_ms)
+        finite_ibis = ibis[np.isfinite(ibis) & (ibis > 0)]
+        if finite_ibis.size > 0:
+            median_ibi = np.median(finite_ibis)
+            # Limit the grouping distance so it cannot exceed a fraction of
+            # the observed median inter-peak interval.
+            dynamic_window = 0.5 * median_ibi
+            if dynamic_window > 0:
+                effective_group_distance_ms = min(sawtooth_group_distance_ms, dynamic_window)
+            # Also prevent any single group from spanning much more than a
+            # typical beat interval.
+            max_group_span_ms = median_ibi
+
     final_peak_indices = []
     sawtooth_flags = []
 
@@ -286,9 +306,16 @@ def detect_peaks(
         prev_idx = current_group[-1]
         curr_idx = peak_indices[i]
 
+        time_diff_prev = time_ms[curr_idx] - time_ms[prev_idx]
+        time_diff_group_start = time_ms[curr_idx] - time_ms[current_group[0]]
+
         # If the time difference between the current peak and the last peak in the group
-        # is within the threshold, add it to the group
-        if (time_ms[curr_idx] - time_ms[prev_idx]) <= sawtooth_group_distance_ms:
+        # is within the (possibly tightened) threshold, and the overall group span is
+        # not excessive, add it to the group.
+        if (
+            time_diff_prev <= effective_group_distance_ms
+            and (max_group_span_ms is None or time_diff_group_start <= max_group_span_ms)
+        ):
             current_group.append(curr_idx)
         else:
             # Process the completed group
