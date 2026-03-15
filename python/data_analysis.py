@@ -4,7 +4,7 @@ Heart Rate Variability (HRV) Analysis for Zebrafish MUSCLEMOTION Data
 
 Reads MUSCLEMOTION output folders from MM_Results/, extracts contraction
 peaks, computes inter-beat intervals, instantaneous and global HRV metrics,
-and estimates an arrhythmia probability for each sample.
+and estimates a heuristic arrhythmia risk score for each sample.
 
 Usage:
     python data_analysis.py [--results_dir PATH] [--output_dir PATH]
@@ -27,9 +27,17 @@ from scipy.signal import find_peaks
 SUMMARY_COLUMNS = [
     "sample", "exposure", "concentration", "well", "fish",
     "n_peaks", "mean_ibi_ms", "sdnn_ms", "rmssd_ms",
-    "cv_ibi", "pnn50", "mean_hr_bpm", "arrhythmia_probability", "Arrhymia",
+    "cv_ibi", "pnn50", "mean_hr_bpm",
+    "arrhythmia_risk_score", "arrhythmia_probability",
+    "arrhythmia_score_cv", "arrhythmia_score_rmssd", "arrhythmia_score_outlier",
+    "arrhythmia_outlier_fraction",
+    "arrhythmia_data_sufficient", "arrhythmia_quality_flag",
+    "arrhythmia_ibi_count", "arrhythmia_threshold", "Arrhymia",
 ]
 ROLLING_RMSSD_WINDOW = 5
+ARRHYTHMIA_DEFAULT_THRESHOLD = 0.5
+ARRHYTHMIA_MIN_IBI_FOR_SCORE = 3
+ARRHYTHMIA_MIN_IBI_FOR_CONFIDENT_DECISION = 6
 
 
 # ---------------------------------------------------------------------------
@@ -188,44 +196,84 @@ def compute_rolling_rmssd(ibi_ms, window=ROLLING_RMSSD_WINDOW):
 # Arrhythmia probability
 # ---------------------------------------------------------------------------
 
-def arrhythmia_probability(ibi_ms):
-    """Estimate the probability that the contraction profile exhibits arrhythmia.
+def _logistic_score(value, midpoint, steepness):
+    """Map an indicator to [0, 1] using a logistic transform."""
+    return 1.0 / (1.0 + np.exp(-steepness * (value - midpoint)))
 
-    The score is a composite of three normalized indicators, each mapped to [0, 1]
-    via a logistic function and then averaged:
 
-    1. **Coefficient of variation (CV)** of IBI – captures overall irregularity.
-    2. **RMSSD / mean IBI** – captures beat-to-beat variability.
-    3. **Outlier fraction** – proportion of IBIs that deviate from the median
-       by more than 30%.
+def compute_arrhythmia_risk(ibi_ms):
+    """Compute a heuristic arrhythmia risk score and supporting diagnostics.
 
-    Returns a float in [0, 1] where values closer to 1 indicate higher
-    arrhythmia likelihood.
+    This is a deterministic irregularity score derived from IBI statistics.
+    It is not a supervised, calibrated probability model.
     """
     ibi = np.asarray(ibi_ms, dtype=float)
-    if len(ibi) < 3:
-        return 0.0
+    n_ibi = int(len(ibi))
+    empty_result = {
+        "arrhythmia_risk_score": np.nan,
+        "arrhythmia_probability": np.nan,  # compatibility alias
+        "arrhythmia_score_cv": np.nan,
+        "arrhythmia_score_rmssd": np.nan,
+        "arrhythmia_score_outlier": np.nan,
+        "arrhythmia_outlier_fraction": np.nan,
+        "arrhythmia_data_sufficient": False,
+        "arrhythmia_quality_flag": "insufficient_ibi",
+        "arrhythmia_ibi_count": n_ibi,
+    }
+    if n_ibi < ARRHYTHMIA_MIN_IBI_FOR_SCORE:
+        return empty_result
 
-    def _logistic(x, midpoint, steepness):
-        return 1.0 / (1.0 + np.exp(-steepness * (x - midpoint)))
+    mean_ibi = np.mean(ibi)
+    if mean_ibi <= 0:
+        invalid_result = dict(empty_result)
+        invalid_result["arrhythmia_quality_flag"] = "invalid_ibi"
+        return invalid_result
 
     # Indicator 1: coefficient of variation
-    cv = np.std(ibi, ddof=1) / np.mean(ibi)
-    score_cv = _logistic(cv, 0.15, 30)
+    cv = np.std(ibi, ddof=1) / mean_ibi
+    score_cv = _logistic_score(cv, 0.15, 30)
 
     # Indicator 2: RMSSD relative to mean IBI
     successive_diff = np.diff(ibi)
-    rmssd_rel = np.sqrt(np.mean(successive_diff ** 2)) / np.mean(ibi)
-    score_rmssd = _logistic(rmssd_rel, 0.15, 30)
+    rmssd_rel = np.sqrt(np.mean(successive_diff ** 2)) / mean_ibi
+    score_rmssd = _logistic_score(rmssd_rel, 0.15, 30)
 
     # Indicator 3: fraction of outlier IBIs (>30 % from median)
     median_ibi = np.median(ibi)
     outlier_frac = np.mean(
         np.abs(ibi - median_ibi) / (median_ibi if median_ibi > 0 else 1.0) > 0.30
     )
-    score_outlier = _logistic(outlier_frac, 0.15, 20)
+    score_outlier = _logistic_score(outlier_frac, 0.15, 20)
+    risk_score = float(np.mean([score_cv, score_rmssd, score_outlier]))
 
-    return float(np.mean([score_cv, score_rmssd, score_outlier]))
+    quality_flag = (
+        "low_ibi_count"
+        if n_ibi < ARRHYTHMIA_MIN_IBI_FOR_CONFIDENT_DECISION
+        else "ok"
+    )
+    return {
+        "arrhythmia_risk_score": risk_score,
+        "arrhythmia_probability": risk_score,  # compatibility alias
+        "arrhythmia_score_cv": float(score_cv),
+        "arrhythmia_score_rmssd": float(score_rmssd),
+        "arrhythmia_score_outlier": float(score_outlier),
+        "arrhythmia_outlier_fraction": float(outlier_frac),
+        "arrhythmia_data_sufficient": True,
+        "arrhythmia_quality_flag": quality_flag,
+        "arrhythmia_ibi_count": n_ibi,
+    }
+
+
+def arrhythmia_probability(ibi_ms):
+    """Compatibility wrapper for the heuristic arrhythmia risk score."""
+    return compute_arrhythmia_risk(ibi_ms)["arrhythmia_probability"]
+
+
+def arrhythmia_decision(risk_score, threshold, data_sufficient):
+    """Return a conservative arrhythmia decision from risk score + threshold."""
+    if not data_sufficient or np.isnan(risk_score):
+        return False
+    return bool(risk_score > threshold)
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +310,11 @@ def plot_contraction_with_peaks(time_ms, signal, peak_indices, peak_times,
 # Main analysis pipeline
 # ---------------------------------------------------------------------------
 
-def analyse_sample_timeseries(folder_path, verbose=True):
+def analyse_sample_timeseries(
+    folder_path,
+    arrhythmia_threshold=ARRHYTHMIA_DEFAULT_THRESHOLD,
+    verbose=True,
+):
     """Analyse a sample folder and return summary + time-series fields.
 
     Returns a dict or None if folder is invalid.
@@ -290,7 +342,12 @@ def analyse_sample_timeseries(folder_path, verbose=True):
     ibi_time_ms = peak_times[1:]
 
     hrv = compute_hrv_metrics(ibi_ms)
-    arr_prob = arrhythmia_probability(ibi_ms)
+    arrhythmia = compute_arrhythmia_risk(ibi_ms)
+    arr_decision = arrhythmia_decision(
+        arrhythmia["arrhythmia_risk_score"],
+        arrhythmia_threshold,
+        arrhythmia["arrhythmia_data_sufficient"],
+    )
     sample_label = f"{meta['exposure']}_{meta['concentration']}_{meta['well']}.{meta['fish']}"
 
     instantaneous_hr = np.where(ibi_ms > 0, 60000.0 / ibi_ms, np.nan)
@@ -324,17 +381,26 @@ def analyse_sample_timeseries(folder_path, verbose=True):
         "speed_values": speed_values.tolist(),
         "has_speed_profile": bool(len(speed_time_ms) > 0),
         **hrv,
-        "arrhythmia_probability": arr_prob,
-        "Arrhymia": arr_prob > 0.5,
+        **arrhythmia,
+        "arrhythmia_threshold": float(arrhythmia_threshold),
+        "Arrhymia": arr_decision,
     }
 
 
-def analyse_sample(folder_path, output_dir=None):
+def analyse_sample(
+    folder_path,
+    output_dir=None,
+    arrhythmia_threshold=ARRHYTHMIA_DEFAULT_THRESHOLD,
+):
     """Run full HRV analysis on one MUSCLEMOTION results folder.
 
     Returns a summary dict or None if folder is not valid.
     """
-    sample_data = analyse_sample_timeseries(folder_path, verbose=True)
+    sample_data = analyse_sample_timeseries(
+        folder_path,
+        arrhythmia_threshold=arrhythmia_threshold,
+        verbose=True,
+    )
     if sample_data is None:
         return None
 
@@ -356,7 +422,11 @@ def analyse_sample(folder_path, output_dir=None):
     return summary
 
 
-def load_all_sample_timeseries(results_dir, verbose=False):
+def load_all_sample_timeseries(
+    results_dir,
+    arrhythmia_threshold=ARRHYTHMIA_DEFAULT_THRESHOLD,
+    verbose=False,
+):
     """Load detailed per-sample series for all valid MUSCLEMOTION folders."""
     if not os.path.isdir(results_dir):
         raise FileNotFoundError(f"results directory not found: {results_dir}")
@@ -368,7 +438,11 @@ def load_all_sample_timeseries(results_dir, verbose=False):
     all_results = []
     for folder_name in folders:
         folder_path = os.path.join(results_dir, folder_name)
-        result = analyse_sample_timeseries(folder_path, verbose=verbose)
+        result = analyse_sample_timeseries(
+            folder_path,
+            arrhythmia_threshold=arrhythmia_threshold,
+            verbose=verbose,
+        )
         if result is not None:
             all_results.append(result)
 
@@ -378,7 +452,11 @@ def load_all_sample_timeseries(results_dir, verbose=False):
     return all_results
 
 
-def run_analysis(results_dir, output_dir):
+def run_analysis(
+    results_dir,
+    output_dir,
+    arrhythmia_threshold=ARRHYTHMIA_DEFAULT_THRESHOLD,
+):
     """Iterate over all sample folders in *results_dir* and produce a summary."""
     if not os.path.isdir(results_dir):
         print(f"Error: results directory not found: {results_dir}")
@@ -395,7 +473,11 @@ def run_analysis(results_dir, output_dir):
     for folder_name in folders:
         folder_path = os.path.join(results_dir, folder_name)
         print(f"Analysing {folder_name} ...")
-        result = analyse_sample(folder_path, output_dir)
+        result = analyse_sample(
+            folder_path,
+            output_dir=output_dir,
+            arrhythmia_threshold=arrhythmia_threshold,
+        )
         if result is not None:
             all_results.append(result)
 
@@ -435,11 +517,23 @@ def main():
         default=default_output,
         help="Path to store output CSV and plots (default: ../output)",
     )
+    parser.add_argument(
+        "--arrhythmia_threshold",
+        type=float,
+        default=ARRHYTHMIA_DEFAULT_THRESHOLD,
+        help=(
+            "Threshold for Arrhymia decision from heuristic risk score "
+            "(range: 0 to 1, default: 0.5)"
+        ),
+    )
     args = parser.parse_args()
+    if not 0.0 <= args.arrhythmia_threshold <= 1.0:
+        parser.error("--arrhythmia_threshold must be between 0 and 1.")
 
     run_analysis(
         os.path.abspath(args.results_dir),
         os.path.abspath(args.output_dir),
+        arrhythmia_threshold=args.arrhythmia_threshold,
     )
 
 

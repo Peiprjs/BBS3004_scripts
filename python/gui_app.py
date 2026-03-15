@@ -272,7 +272,12 @@ def main():
             if pd.api.types.is_numeric_dtype(filtered_df[col])
         ]
         if numeric_cols:
-            default_metric = "arrhythmia_probability" if "arrhythmia_probability" in numeric_cols else numeric_cols[0]
+            if "arrhythmia_risk_score" in numeric_cols:
+                default_metric = "arrhythmia_risk_score"
+            elif "arrhythmia_probability" in numeric_cols:
+                default_metric = "arrhythmia_probability"
+            else:
+                default_metric = numeric_cols[0]
             metric = st.selectbox("Metric distribution", numeric_cols, index=numeric_cols.index(default_metric))
             group_by = st.selectbox("Group by", ["exposure", "concentration", "Arrhymia"])
 
