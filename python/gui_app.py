@@ -5,6 +5,7 @@ Usage:
 """
 
 import os
+from tqdm import tqdm
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -141,7 +142,7 @@ def _interpolate_to_relative_grid(time_ms, values, n_points=INTERP_POINTS):
 
 def _aggregate_group_profiles(records, time_key, value_key, n_points=INTERP_POINTS):
     grouped = {}
-    for record in records:
+    for record in tqdm(records, desc="Aggregating group profiles"):
         interpolated = _interpolate_to_relative_grid(record[time_key], record[value_key], n_points)
         if interpolated is None:
             continue
@@ -178,7 +179,7 @@ def _group_significance(grouped_values, labels, group_by, alpha=0.05):
             return [False] * len(values_list), [np.nan] * len(values_list), "* paired t-test p < 0.05 vs concentration 0 mean"
 
         baseline_values = values_list[baseline_index]
-        for idx, values in enumerate(values_list):
+        for idx, values in enumerate(tqdm(values_list, desc="Calculating group significance")):
             if idx == baseline_index or len(values) < 2 or len(baseline_values) < 2:
                 significance_flags.append(False)
                 p_values.append(np.nan)

@@ -18,6 +18,8 @@ import os
 import re
 import sys
 
+from tqdm import tqdm
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -484,7 +486,7 @@ def add_control_pvalues(full_df):
     df = full_df.copy()
     pvalues = []
 
-    for _, row in df.iterrows():
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="Adding control p-values"):
         sample_ibi = np.asarray(row["ibi_values_ms"], dtype=float)
         if len(sample_ibi) < 2:
             pvalues.append(np.nan)
@@ -951,7 +953,7 @@ def analyse_sample_timeseries(
     contraction_file = os.path.join(folder_path, "contraction.txt")
     if not os.path.isfile(contraction_file):
         if verbose:
-            print(f"  [SKIP] No contraction.txt in {folder_name}")
+            tqdm.write(f"  [SKIP] No contraction.txt in {folder_name}")
         return None
 
     time_ms, signal = load_tsv(contraction_file)
@@ -959,7 +961,7 @@ def analyse_sample_timeseries(
     peak_indices, peak_times = detect_peaks(time_ms, signal)
     if len(peak_times) < 5:
         if verbose:
-            print(f"  [WARN] Fewer than 5 peaks detected in {folder_name}")
+            tqdm.write(f"  [WARN] Fewer than 5 peaks detected in {folder_name}")
         return None
 
     ibi_ms = compute_ibi(peak_times)
@@ -1085,7 +1087,7 @@ def load_all_sample_timeseries(
         raise ValueError(f"No MUSCLEMOTION result folders found in {results_dir}")
 
     all_results = []
-    for folder_name in folders:
+    for folder_name in tqdm(folders, desc="Loading sample timeseries"):
         folder_path = os.path.join(results_dir, folder_name)
         result = analyse_sample_timeseries(
             folder_path,
@@ -1119,9 +1121,8 @@ def run_analysis(
     os.makedirs(output_dir, exist_ok=True)
 
     all_results = []
-    for folder_name in folders:
+    for folder_name in tqdm(folders, desc="Analysing folders"):
         folder_path = os.path.join(results_dir, folder_name)
-        print(f"Analysing {folder_name} ...")
         result = analyse_sample(
             folder_path,
             output_dir=output_dir,
