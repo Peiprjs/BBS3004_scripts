@@ -274,6 +274,7 @@ def main():
         output_dir = st.text_input("Output folder", default_output)
         if st.button("Reload data"):
             st.cache_data.clear()
+    st.sidebar.markdown("DOI: [10.5281/zenodo.19038805](https://doi.org/10.5281/zenodo.19038805)")
 
     results_dir = os.path.abspath(results_dir)
     output_dir = os.path.abspath(output_dir)
