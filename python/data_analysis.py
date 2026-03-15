@@ -444,24 +444,35 @@ def _resample_series(values, target_len):
     return np.interp(x_new, x_old, series)
 
 
-def _paired_ttest_pvalue(sample_values, reference_values):
-    """Return paired t-test p-value for two aligned vectors."""
-    sample = np.asarray(sample_values, dtype=float)
-    reference = np.asarray(reference_values, dtype=float)
-    if len(sample) < 2 or len(reference) < 2:
-        return np.nan
+def paired_ttest_pvalue(values, reference_values, paired=True):
+    """Return paired t-test p-value for two aligned vectors or vs a reference mean.
 
-    n = min(len(sample), len(reference))
-    sample = sample[:n]
-    reference = reference[:n]
-    differences = sample - reference
+    If paired=True, values and reference_values are aligned and must have enough overlap.
+    If paired=False, reference_values' mean is used as a constant reference for values.
+    """
+    values = np.asarray(values, dtype=float)
+    reference_values = np.asarray(reference_values, dtype=float)
+
+    if paired:
+        if len(values) < 2 or len(reference_values) < 2:
+            return np.nan
+        n = min(len(values), len(reference_values))
+        values = values[:n]
+        reference = reference_values[:n]
+    else:
+        if len(values) < 2 or len(reference_values) < 1:
+            return np.nan
+        reference_mean = float(np.mean(reference_values))
+        reference = np.full(values.shape, reference_mean, dtype=float)
+
+    differences = values - reference
 
     if np.allclose(differences, 0.0):
         return 1.0
     if np.allclose(differences, differences[0]):
         return 0.0
 
-    _, p_value = ttest_rel(sample, reference, nan_policy="omit")
+    _, p_value = ttest_rel(values, reference, nan_policy="omit")
     return float(p_value) if np.isfinite(p_value) else np.nan
 
 
@@ -503,7 +514,7 @@ def add_control_pvalues(full_df):
             continue
 
         control_mean = np.mean(np.vstack(aligned_controls), axis=0)
-        pvalues.append(_paired_ttest_pvalue(sample_ibi, control_mean))
+        pvalues.append(paired_ttest_pvalue(sample_ibi, control_mean, paired=True))
 
     df["paired_ttest_pvalue_vs_control0_mean_ibi"] = pvalues
     return df

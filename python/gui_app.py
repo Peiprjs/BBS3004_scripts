@@ -12,9 +12,12 @@ import pandas as pd
 import streamlit as st
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-from scipy.stats import ttest_rel
 
-from data_analysis import SUMMARY_COLUMNS, load_all_sample_timeseries
+from data_analysis import (
+    SUMMARY_COLUMNS,
+    load_all_sample_timeseries,
+    paired_ttest_pvalue,
+)
 
 
 INTERP_POINTS = 300
@@ -169,24 +172,6 @@ def _group_significance(grouped_values, labels, group_by, alpha=0.05):
     significance_flags = []
     p_values = []
 
-    def _paired_ttest_vs_reference(values, reference_values):
-        values = np.asarray(values, dtype=float)
-        reference_values = np.asarray(reference_values, dtype=float)
-        if len(values) < 2 or len(reference_values) < 1:
-            return np.nan
-
-        reference_mean = float(np.mean(reference_values))
-        reference = np.full(values.shape, reference_mean, dtype=float)
-        differences = values - reference
-
-        if np.allclose(differences, 0.0):
-            return 1.0
-        if np.allclose(differences, differences[0]):
-            return 0.0
-
-        _, p_value = ttest_rel(values, reference, nan_policy="omit")
-        return float(p_value) if np.isfinite(p_value) else np.nan
-
     if group_by == "concentration":
         baseline_index = next((idx for idx, label in enumerate(labels) if str(label) == "0"), None)
         if baseline_index is None:
@@ -199,7 +184,7 @@ def _group_significance(grouped_values, labels, group_by, alpha=0.05):
                 p_values.append(np.nan)
                 continue
 
-            p_value = _paired_ttest_vs_reference(values, baseline_values)
+            p_value = paired_ttest_pvalue(values, baseline_values, paired=False)
             p_values.append(p_value)
             significance_flags.append(bool(np.isfinite(p_value) and p_value < alpha))
 
@@ -222,7 +207,7 @@ def _group_significance(grouped_values, labels, group_by, alpha=0.05):
             p_values.append(np.nan)
             continue
 
-        p_value = _paired_ttest_vs_reference(values, rest)
+        p_value = paired_ttest_pvalue(values, rest, paired=False)
         p_values.append(p_value)
         significance_flags.append(bool(np.isfinite(p_value) and p_value < alpha))
 
