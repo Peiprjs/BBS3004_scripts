@@ -270,6 +270,7 @@ def analyse_sample(folder_path, output_dir=None):
         "ibi_values_ms": ibi_ms.tolist(),
         **hrv,
         "arrhythmia_probability": arr_prob,
+        "Arrhymia": arr_prob > 0.5,
     }
 
 
@@ -306,7 +307,7 @@ def run_analysis(results_dir, output_dir):
     summary_cols = [
         "sample", "exposure", "concentration", "well", "fish",
         "n_peaks", "mean_ibi_ms", "sdnn_ms", "rmssd_ms",
-        "cv_ibi", "pnn50", "mean_hr_bpm", "arrhythmia_probability",
+        "cv_ibi", "pnn50", "mean_hr_bpm", "arrhythmia_probability", "Arrhymia",
     ]
     df = pd.DataFrame(all_results)[summary_cols]
     csv_path = os.path.join(output_dir, "hrv_summary.csv")
