@@ -151,13 +151,13 @@ def compute_hrv_metrics(ibi_ms):
 def arrhythmia_probability(ibi_ms):
     """Estimate the probability that the contraction profile exhibits arrhythmia.
 
-    The score is a composite of three normalised indicators, each mapped to [0, 1]
+    The score is a composite of three normalized indicators, each mapped to [0, 1]
     via a logistic function and then averaged:
 
     1. **Coefficient of variation (CV)** of IBI – captures overall irregularity.
     2. **RMSSD / mean IBI** – captures beat-to-beat variability.
     3. **Outlier fraction** – proportion of IBIs that deviate from the median
-       by more than 30 %.
+       by more than 30%.
 
     Returns a float in [0, 1] where values closer to 1 indicate higher
     arrhythmia likelihood.
@@ -180,7 +180,7 @@ def arrhythmia_probability(ibi_ms):
 
     # Indicator 3: fraction of outlier IBIs (>30 % from median)
     median_ibi = np.median(ibi)
-    outlier_frac = np.mean(np.abs(ibi - median_ibi) / median_ibi > 0.30)
+    outlier_frac = np.mean(np.abs(ibi - median_ibi) / (median_ibi if median_ibi > 0 else 1.0) > 0.30)
     score_outlier = _logistic(outlier_frac, 0.15, 20)
 
     return float(np.mean([score_cv, score_rmssd, score_outlier]))
