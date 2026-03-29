@@ -1990,96 +1990,6 @@ def _render_tab_models(output_dir, model_tables):
                 use_container_width=True,
             )
 
-def _render_tab_conclusions(filtered_df, model_tables):
-    st.subheader("Conclusions for current filter selection")
-    
-    # Validate arrhythmia_risk_score column exists
-    if "arrhythmia_risk_score" not in filtered_df.columns:
-        st.warning("Column 'arrhythmia_risk_score' not found in data. Some metrics may be unavailable.")
-        risk_series = pd.Series(dtype=float)
-    else:
-        risk_series = filtered_df["arrhythmia_risk_score"].dropna()
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Samples in view", int(len(filtered_df)))
-    
-    # Validate Arrhymia column exists before accessing
-    if "Arrhymia" in filtered_df.columns:
-        try:
-            arrhythmia_rate = 100.0 * float(filtered_df['Arrhymia'].astype(float).mean())
-            k2.metric("Arrhymia rate", f"{arrhythmia_rate:.1f}%")
-        except (ValueError, TypeError) as e:
-            k2.metric("Arrhymia rate", "n/a")
-            st.info(f"Could not calculate arrhythmia rate: {e}")
-    else:
-        k2.metric("Arrhymia rate", "n/a")
-        st.info("Column 'Arrhymia' not found in data.")
-    
-    k3.metric(
-        "Mean risk score",
-        f"{float(risk_series.mean()):.3f}" if len(risk_series) > 0 else "n/a",
-    )
-
-    top_cols = [
-        col for col in [
-            "sample",
-            "exposure",
-            "concentration",
-            "arrhythmia_risk_score",
-            "Arrhymia",
-            "paired_ttest_pvalue_vs_control0_mean_ibi",
-        ]
-        if col in filtered_df.columns
-    ]
-    if top_cols:
-        st.markdown("**Top 5 highest-risk samples**")
-        top_risk = filtered_df.sort_values(
-            "arrhythmia_risk_score",
-            ascending=False,
-            na_position="last",
-        ).head(5)
-        st.dataframe(top_risk[top_cols], use_container_width=True)
-
-    trend_summary = model_tables.get("linear_trend_summary")
-    if trend_summary is not None and not trend_summary.empty:
-        if "slope" in trend_summary.columns and "p_value" in trend_summary.columns:
-            slope = float(trend_summary.iloc[0]["slope"])
-            p_value = float(trend_summary.iloc[0]["p_value"])
-            direction = "increases" if slope > 0 else "decreases"
-            st.markdown(
-                f"- Concentration trend: risk score **{direction}** with concentration "
-                f"(slope={slope:.4f}, p={p_value:.4g})."
-            )
-        else:
-            st.info("Linear trend summary is missing expected columns.")
-
-    logistic_summary = model_tables.get("logistic_regression_summary")
-    if logistic_summary is not None and not logistic_summary.empty:
-        if "accuracy_at_0_5" in logistic_summary.columns and "mcfadden_pseudo_r2" in logistic_summary.columns:
-            acc = float(logistic_summary.iloc[0]["accuracy_at_0_5"])
-            pseudo_r2 = float(logistic_summary.iloc[0]["mcfadden_pseudo_r2"])
-            st.markdown(
-                f"- Logistic model summary: accuracy={acc:.3f}, McFadden R²={pseudo_r2:.3f}."
-            )
-        else:
-            st.info("Logistic regression summary is missing expected columns.")
-
-    cluster_summary = model_tables.get("unsupervised_cluster_summary")
-    if cluster_summary is not None and not cluster_summary.empty:
-        required_cols = ["arrhythmia_rate", "model", "cluster_id", "n_samples"]
-        if all(col in cluster_summary.columns for col in required_cols):
-            highest_cluster = cluster_summary.sort_values(
-                "arrhythmia_rate",
-                ascending=False,
-            ).iloc[0]
-            st.markdown(
-                f"- Highest-risk discovered cluster: `{highest_cluster['model']}` "
-                f"cluster {int(highest_cluster['cluster_id'])} with "
-                f"arrhythmia_rate={float(highest_cluster['arrhythmia_rate']):.3f} "
-                f"(n={int(highest_cluster['n_samples'])})."
-            )
-        else:
-            st.info("Cluster summary is missing expected columns.")
 
 
 def _render_tab_distribution(filtered_df):
@@ -2370,129 +2280,6 @@ def _render_tab_distribution(filtered_df):
         summary_cols[3].metric("Overall Arrhythmia Rate", f"{arrhythmia_rate:.1f}%")
 
 
-def _render_tab_technical(results_dir, output_dir):
-    st.subheader("Technical architecture")
-    st.markdown(
-        f"The dashboard consumes sample folders from `{results_dir}` and optional model CSV outputs "
-        f"from `{output_dir}`. Rendering is deterministic for a given set of sidebar filters and settings."
-    )
-
-    st.markdown("### Data ingestion and data model")
-    st.markdown(
-        "- `_load_dashboard_data(results_dir)` calls `load_all_sample_timeseries(...)` and materializes:\n"
-        "  - `records`: per-sample dictionaries containing raw time-series arrays and derived metrics.\n"
-        "  - `summary_df`: DataFrame projection restricted to `SUMMARY_COLUMNS`.\n"
-        "- `record_by_sample` is a direct sample-id lookup map used by the fish-level tab.\n"
-        "- Sidebar filters (`exposure`, `concentration`, `excluded cases`) are applied to `summary_df`; "
-        "the resulting `sample` list is then used to derive `filtered_records`."
-    )
-
-    st.markdown("### Cache boundaries and invalidation")
-    st.markdown(
-        "- `_load_dashboard_data(results_dir)` is `@st.cache_data`: cache key boundary is the function input "
-        "(the resolved results directory path).\n"
-        "- `_load_model_output_tables(output_dir)` is `@st.cache_data`: cache key boundary is the resolved "
-        "output directory path and file contents read in that call.\n"
-        "- The **Reload data** button executes `st.cache_data.clear()`, invalidating both caches in one step."
-    )
-
-    st.markdown("### Peak detection and sawtooth masking")
-    st.markdown(
-        "Peak extraction is executed upstream in `data_analysis.detect_peaks(...)`:\n"
-        "- Baseline removal uses a rolling median (default 800 ms window), then `find_peaks` on detrended data.\n"
-        "- Prominence uses `prominence_factor * spread`, where spread is outlier-trimmed when "
-        "`range / trimmed_range > 2.0`.\n"
-        "- A fallback raw-signal peak pass is used if detrended detection yields fewer than two peaks.\n"
-        "- Candidate peaks are grouped into sawtooth clusters if temporal spacing is below a dynamic window "
-        "`min(500 ms, 0.5 * median_ibi)` and group span is bounded by median IBI.\n"
-        "- Each cluster is reduced to the maximum-amplitude peak; cluster-derived peaks are marked "
-        "`sawtooth_peak=True`."
-    )
-    st.markdown(
-        "In the fish profile plot, non-sawtooth peaks are rendered as red markers and sawtooth-derived peaks "
-        "as blue markers."
-    )
-
-    st.markdown("### HRV formulas and rolling features")
-    st.markdown(
-        "- `IBI_i = peak_time_i - peak_time_{i-1}` (ms)\n"
-        "- `mean_ibi_ms = mean(IBI)`\n"
-        "- `sdnn_ms = std(IBI, ddof=1)`\n"
-        "- `rmssd_ms = sqrt(mean(diff(IBI)^2))`\n"
-        "- `cv_ibi = sdnn_ms / mean_ibi_ms`\n"
-        "- `pnn50 = 100 * mean(|diff(IBI)| > 50 ms)`\n"
-        "- `mean_hr_bpm = 60000 / mean_ibi_ms`\n"
-        "- Rolling RMSSD uses a fixed window (`ROLLING_RMSSD_WINDOW = 5`) over consecutive IBI segments."
-    )
-
-    st.markdown("### Contraction amplitude analysis pipeline")
-    st.markdown(
-        "Amplitude features are computed upstream in `data_analysis.compute_contraction_amplitudes(...)`:\n"
-        "- For each detected peak, the local trough is taken from the interval between the previous peak boundary "
-        "and the current peak.\n"
-        "- Beat amplitude is `peak_value - trough_value`, clipped to `>= 0`.\n"
-        "- Per-sample summary metrics are persisted as `contraction_amplitude_mean`, "
-        "`contraction_amplitude_std`, and `contraction_amplitude_range`.\n"
-        "- The **Contraction amplitude analysis** tab renders concentration-grouped boxplots for "
-        "`contraction_amplitude_mean` and `contraction_amplitude_range`, with significance annotations."
-    )
-
-    st.markdown("### Contraction force analysis pipeline")
-    st.markdown(
-        "Force proxy features are derived from `speed-of-contraction.txt` and "
-        "`data_analysis.compute_force_of_contraction(...)`:\n"
-        "- If speed data exists, the dashboard records `speed_time_ms` and `speed_values`; otherwise empty arrays "
-        "are carried through.\n"
-        "- Force metrics use non-negative speed (`clip(speed, 0, +inf)`) and report "
-        "`force_of_contraction_mean_au`, `force_of_contraction_std_au`, and `force_of_contraction_peak_au`.\n"
-        "- If finite speed values are unavailable, these metrics are `NaN`.\n"
-        "- The **Contraction force analysis** tab combines a fish-level speed profile view "
-        "(`_plot_speed_profile`) with concentration-grouped boxplots for the three force metrics."
-    )
-
-    st.markdown("### Transients analysis pipeline")
-    st.markdown(
-        "Transient timing features are computed in `data_analysis.compute_transient_metrics(...)` on a "
-        "per-beat window:\n"
-        "- Beat windows are bounded by midpoints between adjacent peaks.\n"
-        "- Rise time: from left-side local minimum to peak.\n"
-        "- Decay time: from peak to right-side local minimum.\n"
-        "- Duration: from left minimum to right minimum.\n"
-        "- FWHM: crossing width around half-max, where baseline is the minimum of the left/right minima.\n"
-        "- Per-sample means are exposed as `transient_rise_time_mean_ms`, `transient_decay_time_mean_ms`, "
-        "`transient_duration_mean_ms`, and `transient_fwhm_mean_ms`.\n"
-        "- The **Transients analysis** tab renders concentration-grouped boxplots with significance annotations "
-        "for these four metrics."
-    )
-
-    st.markdown("### Arrhythmia risk score and decision rule")
-    st.markdown(
-        "The risk score is a heuristic composite from `compute_arrhythmia_risk(...)`:\n"
-        "- `score_cv = sigmoid(30 * (cv - 0.15))`\n"
-        "- `score_rmssd = sigmoid(30 * (rmssd_rel - 0.15))`, where `rmssd_rel = rmssd / mean_ibi`\n"
-        "- `outlier_frac = mean(|IBI - median(IBI)| / median(IBI) > 0.30)`\n"
-        "- `score_outlier = sigmoid(20 * (outlier_frac - 0.15))`\n"
-        "- `arrhythmia_risk_score = mean(score_cv, score_rmssd, score_outlier)`\n"
-        "- `Arrhymia` decision is `risk_score > arrhythmia_threshold` with data sufficiency gating "
-        "(minimum IBI count checks)."
-    )
-
-    st.markdown("### Model outputs and advanced-table hydration")
-    st.markdown(
-        "Model tables are loaded from `output_dir` using `MODEL_OUTPUT_FILES`. Missing files are represented "
-        "as `None`, allowing partial output sets. Advanced tabs then consume these tables for regression "
-        "metrics, coefficient tables, clustering summaries, PCA variance/loadings, and sample assignments."
-    )
-
-    st.markdown("### Rendering flow")
-    st.markdown(
-        "1. Initialize page config, CSS, and session-state defaults.\n"
-        "2. Resolve absolute paths for results and output directories.\n"
-        "3. Load cached data/model tables.\n"
-        "4. Apply sidebar filters and build `filtered_df` and `filtered_records`.\n"
-        "5. Construct tabs as: base tabs + optional advanced tabs + optional technical tab.\n"
-        "6. Execute tab-specific renderers (`_render_tab_*`) to produce plots, tables, and summaries."
-    )
 
 
 def _render_tab_waveform_overlay(record_by_sample, all_samples):
@@ -2957,8 +2744,6 @@ def main():
             ("Distribution", "distribution"),
             ("Waveform Overlay", "waveform_overlay"),
             ("Model summaries", "models"),
-            ("Conclusions", "conclusions"),
-            ("Technical architecture", "technical")
         ]
 
         all_tab_labels = [label for label, _ in all_tab_specs]
@@ -3062,14 +2847,6 @@ def main():
     if "models" in tab_by_key:
         with tab_by_key["models"]:
             _render_tab_models(output_dir, model_tables)
-
-    if "conclusions" in tab_by_key:
-        with tab_by_key["conclusions"]:
-            _render_tab_conclusions(filtered_df, model_tables)
-
-    if "technical" in tab_by_key:
-        with tab_by_key["technical"]:
-            _render_tab_technical(results_dir, output_dir)
 
 
 if __name__ == "__main__":
