@@ -53,9 +53,9 @@ MODEL_OUTPUT_FILES = {
     "unsupervised_pca_loadings": "unsupervised_pca_loadings.csv",
 }
 EXPOSURE_COLORS = {
-    "Phe": {"primary": "tab:blue", "light": "#6baed6", "dark": "#08519c"},
-    "Terf": {"primary": "tab:red", "light": "#fc9272", "dark": "#a50f15"},
-    "0": {"primary": "tab:gray", "light": "#969696", "dark": "#525252"},
+    "Phe": {"primary": "#1f77b4", "light": "#6baed6", "dark": "#08519c"},
+    "Terf": {"primary": "#d62728", "light": "#fc9272", "dark": "#a50f15"},
+    "0": {"primary": "#7f7f7f", "light": "#969696", "dark": "#525252"},
 }
 
 
@@ -66,17 +66,17 @@ class ColorConfig:
         self.exposure_colors = EXPOSURE_COLORS.copy()
         
         # Matplotlib colors
-        self.peak_marker_color = "red"
-        self.sawtooth_marker_color = "blue"
-        self.speed_line_color = "tab:orange"
-        self.ibi_line_color = "black"
-        self.rolling_rmssd_color = "tab:green"
+        self.peak_marker_color = "#d62728"
+        self.sawtooth_marker_color = "#1f77b4"
+        self.speed_line_color = "#ff7f0e"
+        self.ibi_line_color = "#000000"
+        self.rolling_rmssd_color = "#2ca02c"
         
         # Boxplot colors
-        self.boxplot_median_color = "tab:orange"
-        self.boxplot_mean_color = "tab:green"
-        self.boxplot_significance_color = "crimson"
-        self.boxplot_box_color = "tab:blue"
+        self.boxplot_median_color = "#ff7f0e"
+        self.boxplot_mean_color = "#2ca02c"
+        self.boxplot_significance_color = "#dc143c"
+        self.boxplot_box_color = "#1f77b4"
         
         # Plotly scales
         self.concentration_scale = "Blues"
@@ -95,7 +95,7 @@ class ColorConfig:
         """Get color for exposure with fallback"""
         if exposure in self.exposure_colors:
             return self.exposure_colors[exposure].get(shade, self.exposure_colors[exposure]["primary"])
-        return "tab:gray"
+        return "#7f7f7f"
 
 
 DEFAULT_EXCLUDED_CASES = [
@@ -763,7 +763,7 @@ def _get_exposure_color(exposure, shade="primary"):
     # Fallback if session_state not initialized yet
     if exposure in EXPOSURE_COLORS:
         return EXPOSURE_COLORS[exposure].get(shade, EXPOSURE_COLORS[exposure]["primary"])
-    return "tab:gray"
+    return "#7f7f7f"
 
 
 def _filter_records_by_exposure(records, exposure):
@@ -1093,7 +1093,9 @@ def _plot_fish_profile(record):
                 ax.plot(
                     peak_times_s[normal_mask],
                     contraction[peak_indices[normal_mask]],
-                    color_config.peak_marker_color + "v",
+                    marker="v",
+                    color=color_config.peak_marker_color,
+                    linestyle="none",
                     markersize=6,
                     label="Detected peaks",
                 )
@@ -1101,12 +1103,22 @@ def _plot_fish_profile(record):
                 ax.plot(
                     peak_times_s[sawtooth_mask],
                     contraction[peak_indices[sawtooth_mask]],
-                    color_config.sawtooth_marker_color + "v",
+                    marker="v",
+                    color=color_config.sawtooth_marker_color,
+                    linestyle="none",
                     markersize=6,
                     label="Detected sawtooth peaks",
                 )
         else:
-            ax.plot(peak_times_s, contraction[peak_indices], color_config.peak_marker_color + "v", markersize=6, label="Detected peaks")
+            ax.plot(
+                peak_times_s,
+                contraction[peak_indices],
+                marker="v",
+                color=color_config.peak_marker_color,
+                linestyle="none",
+                markersize=6,
+                label="Detected peaks"
+            )
     ax.set_xlim(left=0.0)
     ax.set_xlabel("Recording time (s)")
     ax.set_ylabel("Contraction amplitude (a.u.)")
@@ -2503,6 +2515,34 @@ def _render_tab_waveform_overlay(record_by_sample, all_samples):
         help="Choose multiple samples to compare their contraction waveforms"
     )
     
+    if not selected_samples:
+        st.info("Please select at least one sample to display waveforms.")
+        return
+    
+    # Per-sample color customization
+    st.markdown("### Custom Colors for Each Sample")
+    sample_colors = {}
+    
+    color_cols = st.columns(min(3, len(selected_samples)))
+    for idx, sample_id in enumerate(selected_samples):
+        col = color_cols[idx % len(color_cols)]
+        
+        # Get default color based on exposure or palette
+        exposure = sample_id.split("_")[0] if "_" in sample_id else None
+        if exposure and exposure in EXPOSURE_COLORS:
+            default_color = EXPOSURE_COLORS[exposure]["primary"]
+        else:
+            default_color = color_config.waveform_palette[idx % len(color_config.waveform_palette)]
+        
+        # Color picker for this sample
+        with col:
+            sample_color = st.color_picker(
+                f"{sample_id}",
+                value=default_color,
+                key=f"waveform_color_{sample_id}"
+            )
+            sample_colors[sample_id] = sample_color
+    
     # Processing options
     col1, col2 = st.columns(2)
     with col1:
@@ -2518,10 +2558,6 @@ def _render_tab_waveform_overlay(record_by_sample, all_samples):
             help="Apply linear detrending to remove baseline wandering"
         )
     
-    if not selected_samples:
-        st.info("Please select at least one sample to display waveforms.")
-        return
-    
     if len(selected_samples) > 20:
         st.warning("You've selected more than 20 samples. The plot may be cluttered.")
     
@@ -2530,10 +2566,6 @@ def _render_tab_waveform_overlay(record_by_sample, all_samples):
     
     fig = go.Figure()
     summary_data = []
-    color_idx = 0
-    
-    # Use color palette from ColorConfig
-    color_palette = color_config.waveform_palette
     
     for sample_id in selected_samples:
         if sample_id not in record_by_sample:
@@ -2549,15 +2581,8 @@ def _render_tab_waveform_overlay(record_by_sample, all_samples):
             st.warning(f"Insufficient data for sample {sample_id}")
             continue
         
-        # Extract exposure from sample_id for color mapping
-        exposure = sample_id.split("_")[0] if "_" in sample_id else None
-        
-        # Determine color
-        if exposure and exposure in EXPOSURE_COLORS:
-            color = EXPOSURE_COLORS[exposure]["primary"]
-        else:
-            color = color_palette[color_idx % len(color_palette)]
-            color_idx += 1
+        # Use custom color from color picker
+        color = sample_colors.get(sample_id, "#cccccc")
         
         # Apply baseline correction (detrending)
         if apply_detrend:
@@ -2780,7 +2805,7 @@ def main():
     )
     
     # Color Settings
-    with st.sidebar.expander("🎨 Color Settings", expanded=False):
+    with st.sidebar.expander("Color Settings", expanded=False):
         color_config = st.session_state["color_config"]
         
         st.markdown("**Matplotlib Colors**")
@@ -2882,6 +2907,35 @@ def main():
             )
             if new_normal_color != color_config.normal_color:
                 color_config.normal_color = new_normal_color
+        
+        st.markdown("**Exposure Group Colors**")
+        col7, col8, col9 = st.columns(3)
+        with col7:
+            new_phe_color = st.color_picker(
+                "Phe Exposure",
+                color_config.exposure_colors["Phe"]["primary"],
+                key="phe_exposure_color_picker"
+            )
+            if new_phe_color != color_config.exposure_colors["Phe"]["primary"]:
+                color_config.exposure_colors["Phe"]["primary"] = new_phe_color
+        
+        with col8:
+            new_terf_color = st.color_picker(
+                "Terf Exposure",
+                color_config.exposure_colors["Terf"]["primary"],
+                key="terf_exposure_color_picker"
+            )
+            if new_terf_color != color_config.exposure_colors["Terf"]["primary"]:
+                color_config.exposure_colors["Terf"]["primary"] = new_terf_color
+        
+        with col9:
+            new_control_color = st.color_picker(
+                "Control (0)",
+                color_config.exposure_colors["0"]["primary"],
+                key="control_exposure_color_picker"
+            )
+            if new_control_color != color_config.exposure_colors["0"]["primary"]:
+                color_config.exposure_colors["0"]["primary"] = new_control_color
         
         if st.button("Reset to Defaults", key="reset_colors"):
             st.session_state["color_config"] = ColorConfig()
