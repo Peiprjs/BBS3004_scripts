@@ -15,7 +15,15 @@ import plotly.express as px
 import streamlit as st
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-from scipy.stats import f_oneway
+from scipy.stats import (
+    f_oneway,
+    pearsonr,
+    spearmanr,
+    mannwhitneyu,
+    kruskal,
+    wilcoxon,
+    chi2_contingency,
+)
 from scipy.signal import detrend
 
 # Configure logging
@@ -49,6 +57,47 @@ EXPOSURE_COLORS = {
     "Terf": {"primary": "tab:red", "light": "#fc9272", "dark": "#a50f15"},
     "0": {"primary": "tab:gray", "light": "#969696", "dark": "#525252"},
 }
+
+
+class ColorConfig:
+    """Centralized color configuration for all dashboard visualizations"""
+    def __init__(self):
+        # Exposure colors (from existing EXPOSURE_COLORS)
+        self.exposure_colors = EXPOSURE_COLORS.copy()
+        
+        # Matplotlib colors
+        self.peak_marker_color = "red"
+        self.sawtooth_marker_color = "blue"
+        self.speed_line_color = "tab:orange"
+        self.ibi_line_color = "black"
+        self.rolling_rmssd_color = "tab:green"
+        
+        # Boxplot colors
+        self.boxplot_median_color = "tab:orange"
+        self.boxplot_mean_color = "tab:green"
+        self.boxplot_significance_color = "crimson"
+        self.boxplot_box_color = "tab:blue"
+        
+        # Plotly scales
+        self.concentration_scale = "Blues"
+        self.well_scale = "Greens"
+        self.arrhythmia_rate_scale = "Reds"
+        
+        # Arrhythmia status colors
+        self.arrhythmic_color = "#ff6b6b"
+        self.normal_color = "#51cf66"
+        
+        # Waveform overlay palette
+        self.waveform_palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", 
+                                  "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+    
+    def get_exposure_color(self, exposure, shade="primary"):
+        """Get color for exposure with fallback"""
+        if exposure in self.exposure_colors:
+            return self.exposure_colors[exposure].get(shade, self.exposure_colors[exposure]["primary"])
+        return "tab:gray"
+
+
 DEFAULT_EXCLUDED_CASES = [
     "Terf_0_1.2",
     "Phe_100_2.1",
@@ -106,6 +155,600 @@ section[data-testid="stSidebar"] code {
 """
 
 
+class StatisticalTestRegistry:
+    """Registry for custom statistical tests"""
+    def __init__(self):
+        self._tests = {}
+    
+    def register(self, name, test_func, description="", params=None):
+        """
+        Register a statistical test
+        
+        Args:
+            name: Display name for the test
+            test_func: Function(df, metric, group_col, **kwargs) -> dict
+            description: Help text describing the test
+            params: List of additional parameter specs (optional)
+        """
+        self._tests[name] = {
+            "func": test_func,
+            "description": description,
+            "params": params or []
+        }
+    
+    def get_test_names(self):
+        """Get list of registered test names"""
+        return list(self._tests.keys())
+    
+    def get_test(self, name):
+        """Get test by name"""
+        return self._tests.get(name)
+    
+    def run_test(self, name, df, metric, group_col, **kwargs):
+        """Execute a registered test"""
+        test = self.get_test(name)
+        if test is None:
+            return None
+        return test["func"](df, metric, group_col, **kwargs)
+
+
+# Standardized test result format - all registered tests should return dict with:
+# - test_name: str (name of the test)
+# - statistic: float (test statistic value)
+# - p_value: float (statistical significance)
+# - effect_size: float (if applicable, else None)
+# - interpretation: str (human-readable result summary)
+# - n_groups: int (number of groups compared)
+# - n_total: int (total sample size)
+# - additional_info: dict (test-specific metrics, optional)
+
+
+def _test_pearson_correlation(df, metric, group_col=None, **kwargs):
+    """
+    Pearson correlation test between two continuous variables.
+    Tests linear relationship between metric and a second variable.
+    
+    Args:
+        df: DataFrame with data
+        metric: First variable column name
+        group_col: Second variable column name (required for correlation)
+        **kwargs: Additional args (second_var can override group_col)
+    
+    Returns:
+        Standardized test result dict
+    """
+    second_var = kwargs.get("second_var", group_col)
+    
+    if second_var is None or second_var not in df.columns:
+        return {
+            "test_name": "Pearson Correlation",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": "Error: Second variable not specified or not found in data",
+            "n_groups": 2,
+            "n_total": 0,
+            "additional_info": {}
+        }
+    
+    # Get valid data (drop NaN)
+    valid_data = df[[metric, second_var]].dropna()
+    
+    if len(valid_data) < 3:
+        return {
+            "test_name": "Pearson Correlation",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": f"Insufficient data: n={len(valid_data)} (minimum 3 required)",
+            "n_groups": 2,
+            "n_total": len(valid_data),
+            "additional_info": {}
+        }
+    
+    # Calculate Pearson correlation
+    r, p_value = pearsonr(valid_data[metric], valid_data[second_var])
+    
+    # Interpret correlation strength (effect size = |r|)
+    abs_r = abs(r)
+    if abs_r < 0.3:
+        strength = "weak"
+    elif abs_r < 0.7:
+        strength = "moderate"
+    else:
+        strength = "strong"
+    
+    direction = "positive" if r > 0 else "negative"
+    sig_text = "significant" if p_value < 0.05 else "not significant"
+    
+    interpretation = f"{strength.capitalize()} {direction} correlation (r={r:.3f}, p={p_value:.4f}), {sig_text}"
+    
+    return {
+        "test_name": "Pearson Correlation",
+        "statistic": r,
+        "p_value": p_value,
+        "effect_size": abs_r,
+        "interpretation": interpretation,
+        "n_groups": 2,
+        "n_total": len(valid_data),
+        "additional_info": {
+            "correlation_coefficient": r,
+            "direction": direction,
+            "strength": strength
+        }
+    }
+
+
+def _test_spearman_correlation(df, metric, group_col=None, **kwargs):
+    """
+    Spearman rank correlation test between two variables.
+    Non-parametric test for monotonic relationship (doesn't assume linearity).
+    
+    Args:
+        df: DataFrame with data
+        metric: First variable column name
+        group_col: Second variable column name (required for correlation)
+        **kwargs: Additional args (second_var can override group_col)
+    
+    Returns:
+        Standardized test result dict
+    """
+    second_var = kwargs.get("second_var", group_col)
+    
+    if second_var is None or second_var not in df.columns:
+        return {
+            "test_name": "Spearman Correlation",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": "Error: Second variable not specified or not found in data",
+            "n_groups": 2,
+            "n_total": 0,
+            "additional_info": {}
+        }
+    
+    # Get valid data (drop NaN)
+    valid_data = df[[metric, second_var]].dropna()
+    
+    if len(valid_data) < 3:
+        return {
+            "test_name": "Spearman Correlation",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": f"Insufficient data: n={len(valid_data)} (minimum 3 required)",
+            "n_groups": 2,
+            "n_total": len(valid_data),
+            "additional_info": {}
+        }
+    
+    # Calculate Spearman correlation
+    rho, p_value = spearmanr(valid_data[metric], valid_data[second_var])
+    
+    # Interpret correlation strength (effect size = |rho|)
+    abs_rho = abs(rho)
+    if abs_rho < 0.3:
+        strength = "weak"
+    elif abs_rho < 0.7:
+        strength = "moderate"
+    else:
+        strength = "strong"
+    
+    direction = "positive" if rho > 0 else "negative"
+    sig_text = "significant" if p_value < 0.05 else "not significant"
+    
+    interpretation = f"{strength.capitalize()} {direction} monotonic relationship (ρ={rho:.3f}, p={p_value:.4f}), {sig_text}"
+    
+    return {
+        "test_name": "Spearman Correlation",
+        "statistic": rho,
+        "p_value": p_value,
+        "effect_size": abs_rho,
+        "interpretation": interpretation,
+        "n_groups": 2,
+        "n_total": len(valid_data),
+        "additional_info": {
+            "correlation_coefficient": rho,
+            "direction": direction,
+            "strength": strength
+        }
+    }
+
+
+def _test_mann_whitney_u(df, metric, group_col=None, **kwargs):
+    """
+    Mann-Whitney U test (Wilcoxon rank-sum test).
+    Non-parametric alternative to independent t-test for comparing two groups.
+    
+    Args:
+        df: DataFrame with data
+        metric: Metric column name to compare
+        group_col: Column defining the two groups
+        **kwargs: Additional arguments
+    
+    Returns:
+        Standardized test result dict
+    """
+    if group_col is None or group_col not in df.columns:
+        return {
+            "test_name": "Mann-Whitney U",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": "Error: Group column not specified or not found in data",
+            "n_groups": 2,
+            "n_total": 0,
+            "additional_info": {}
+        }
+    
+    # Get valid data
+    valid_data = df[[metric, group_col]].dropna()
+    groups = valid_data[group_col].unique()
+    
+    if len(groups) != 2:
+        return {
+            "test_name": "Mann-Whitney U",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": f"Error: Exactly 2 groups required, found {len(groups)}",
+            "n_groups": len(groups),
+            "n_total": len(valid_data),
+            "additional_info": {}
+        }
+    
+    # Split into two groups
+    group1_data = valid_data[valid_data[group_col] == groups[0]][metric].values
+    group2_data = valid_data[valid_data[group_col] == groups[1]][metric].values
+    
+    if len(group1_data) < 3 or len(group2_data) < 3:
+        return {
+            "test_name": "Mann-Whitney U",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": f"Insufficient data: group sizes {len(group1_data)}, {len(group2_data)} (minimum 3 each)",
+            "n_groups": 2,
+            "n_total": len(valid_data),
+            "additional_info": {}
+        }
+    
+    # Perform Mann-Whitney U test
+    statistic, p_value = mannwhitneyu(group1_data, group2_data, alternative='two-sided')
+    
+    # Calculate effect size (rank-biserial correlation)
+    n1, n2 = len(group1_data), len(group2_data)
+    # r = 1 - (2*U) / (n1*n2), where U is the smaller U statistic
+    r_rank_biserial = 1 - (2 * statistic) / (n1 * n2)
+    effect_size = abs(r_rank_biserial)
+    
+    # Interpret effect size
+    if effect_size < 0.3:
+        effect_str = "small"
+    elif effect_size < 0.5:
+        effect_str = "medium"
+    else:
+        effect_str = "large"
+    
+    sig_text = "significant" if p_value < 0.05 else "not significant"
+    median1, median2 = np.median(group1_data), np.median(group2_data)
+    
+    interpretation = f"Groups differ ({sig_text}, U={statistic:.1f}, p={p_value:.4f}). Effect: {effect_str} (r={effect_size:.3f}). Medians: {median1:.2f} vs {median2:.2f}"
+    
+    return {
+        "test_name": "Mann-Whitney U",
+        "statistic": statistic,
+        "p_value": p_value,
+        "effect_size": effect_size,
+        "interpretation": interpretation,
+        "n_groups": 2,
+        "n_total": len(valid_data),
+        "additional_info": {
+            "u_statistic": statistic,
+            "rank_biserial_r": r_rank_biserial,
+            "group1_median": median1,
+            "group2_median": median2,
+            "group1_n": n1,
+            "group2_n": n2
+        }
+    }
+
+
+def _test_kruskal_wallis(df, metric, group_col=None, **kwargs):
+    """
+    Kruskal-Wallis H test.
+    Non-parametric alternative to one-way ANOVA for comparing 3+ groups.
+    
+    Args:
+        df: DataFrame with data
+        metric: Metric column name to compare
+        group_col: Column defining the groups
+        **kwargs: Additional arguments
+    
+    Returns:
+        Standardized test result dict
+    """
+    if group_col is None or group_col not in df.columns:
+        return {
+            "test_name": "Kruskal-Wallis",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": "Error: Group column not specified or not found in data",
+            "n_groups": 0,
+            "n_total": 0,
+            "additional_info": {}
+        }
+    
+    # Get valid data
+    valid_data = df[[metric, group_col]].dropna()
+    groups = valid_data[group_col].unique()
+    
+    if len(groups) < 2:
+        return {
+            "test_name": "Kruskal-Wallis",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": f"Error: At least 2 groups required, found {len(groups)}",
+            "n_groups": len(groups),
+            "n_total": len(valid_data),
+            "additional_info": {}
+        }
+    
+    # Split data by group
+    group_data = [valid_data[valid_data[group_col] == g][metric].values for g in groups]
+    
+    # Check minimum sample sizes
+    group_sizes = [len(g) for g in group_data]
+    if any(size < 3 for size in group_sizes):
+        return {
+            "test_name": "Kruskal-Wallis",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": f"Insufficient data: group sizes {group_sizes} (minimum 3 each)",
+            "n_groups": len(groups),
+            "n_total": len(valid_data),
+            "additional_info": {}
+        }
+    
+    # Perform Kruskal-Wallis test
+    statistic, p_value = kruskal(*group_data)
+    
+    # Calculate effect size (epsilon squared)
+    n = len(valid_data)
+    k = len(groups)
+    epsilon_squared = (statistic - k + 1) / (n - k)
+    epsilon_squared = max(0, min(1, epsilon_squared))  # Clamp to [0, 1]
+    
+    # Interpret effect size
+    if epsilon_squared < 0.01:
+        effect_str = "negligible"
+    elif epsilon_squared < 0.06:
+        effect_str = "small"
+    elif epsilon_squared < 0.14:
+        effect_str = "medium"
+    else:
+        effect_str = "large"
+    
+    sig_text = "significant" if p_value < 0.05 else "not significant"
+    
+    interpretation = f"Groups differ ({sig_text}, H={statistic:.2f}, p={p_value:.4f}). Effect: {effect_str} (ε²={epsilon_squared:.3f}). {len(groups)} groups, n={n}"
+    
+    return {
+        "test_name": "Kruskal-Wallis",
+        "statistic": statistic,
+        "p_value": p_value,
+        "effect_size": epsilon_squared,
+        "interpretation": interpretation,
+        "n_groups": len(groups),
+        "n_total": n,
+        "additional_info": {
+            "h_statistic": statistic,
+            "epsilon_squared": epsilon_squared,
+            "group_sizes": dict(zip([str(g) for g in groups], group_sizes)),
+            "group_medians": dict(zip([str(g) for g in groups], [np.median(gd) for gd in group_data]))
+        }
+    }
+
+
+def _test_wilcoxon_signed_rank(df, metric, group_col=None, **kwargs):
+    """
+    Wilcoxon signed-rank test.
+    Non-parametric test for paired samples (e.g., before/after measurements).
+    
+    Args:
+        df: DataFrame with data
+        metric: Metric column name (or first paired variable)
+        group_col: Second paired variable column name
+        **kwargs: Additional args (second_var can override group_col)
+    
+    Returns:
+        Standardized test result dict
+    """
+    second_var = kwargs.get("second_var", group_col)
+    
+    if second_var is None or second_var not in df.columns:
+        return {
+            "test_name": "Wilcoxon Signed-Rank",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": "Error: Second variable not specified or not found in data (paired samples required)",
+            "n_groups": 2,
+            "n_total": 0,
+            "additional_info": {}
+        }
+    
+    # Get valid paired data
+    valid_data = df[[metric, second_var]].dropna()
+    
+    if len(valid_data) < 6:
+        return {
+            "test_name": "Wilcoxon Signed-Rank",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": f"Insufficient data: n={len(valid_data)} pairs (minimum 6 required)",
+            "n_groups": 2,
+            "n_total": len(valid_data),
+            "additional_info": {}
+        }
+    
+    x = valid_data[metric].values
+    y = valid_data[second_var].values
+    
+    # Perform Wilcoxon signed-rank test
+    statistic, p_value = wilcoxon(x, y, alternative='two-sided')
+    
+    # Calculate effect size (r = Z / sqrt(N))
+    # For Wilcoxon, approximate Z from p-value
+    from scipy.stats import norm
+    if p_value > 0:
+        z_score = abs(norm.ppf(p_value / 2))
+        effect_size = z_score / np.sqrt(len(valid_data))
+    else:
+        effect_size = 1.0
+    
+    # Interpret effect size
+    if effect_size < 0.3:
+        effect_str = "small"
+    elif effect_size < 0.5:
+        effect_str = "medium"
+    else:
+        effect_str = "large"
+    
+    sig_text = "significant" if p_value < 0.05 else "not significant"
+    median_diff = np.median(x - y)
+    
+    interpretation = f"Paired samples differ ({sig_text}, W={statistic:.1f}, p={p_value:.4f}). Effect: {effect_str} (r={effect_size:.3f}). Median difference: {median_diff:.2f}"
+    
+    return {
+        "test_name": "Wilcoxon Signed-Rank",
+        "statistic": statistic,
+        "p_value": p_value,
+        "effect_size": effect_size,
+        "interpretation": interpretation,
+        "n_groups": 2,
+        "n_total": len(valid_data),
+        "additional_info": {
+            "w_statistic": statistic,
+            "median_difference": median_diff,
+            "n_pairs": len(valid_data)
+        }
+    }
+
+
+def _test_chi_square(df, metric, group_col=None, **kwargs):
+    """
+    Chi-square test of independence.
+    Tests association between two categorical variables.
+    
+    Args:
+        df: DataFrame with data
+        metric: First categorical variable column name
+        group_col: Second categorical variable column name
+        **kwargs: Additional arguments
+    
+    Returns:
+        Standardized test result dict
+    """
+    if group_col is None or group_col not in df.columns:
+        return {
+            "test_name": "Chi-Square",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": "Error: Group column not specified or not found in data",
+            "n_groups": 0,
+            "n_total": 0,
+            "additional_info": {}
+        }
+    
+    # Get valid data
+    valid_data = df[[metric, group_col]].dropna()
+    
+    if len(valid_data) < 5:
+        return {
+            "test_name": "Chi-Square",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": f"Insufficient data: n={len(valid_data)} (minimum 5 required)",
+            "n_groups": 0,
+            "n_total": len(valid_data),
+            "additional_info": {}
+        }
+    
+    # Create contingency table
+    contingency_table = pd.crosstab(valid_data[metric], valid_data[group_col])
+    
+    # Check if table has at least 2x2 dimensions
+    if contingency_table.shape[0] < 2 or contingency_table.shape[1] < 2:
+        return {
+            "test_name": "Chi-Square",
+            "statistic": None,
+            "p_value": None,
+            "effect_size": None,
+            "interpretation": f"Error: Contingency table too small ({contingency_table.shape[0]}x{contingency_table.shape[1]}), need at least 2x2",
+            "n_groups": contingency_table.shape[0] * contingency_table.shape[1],
+            "n_total": len(valid_data),
+            "additional_info": {}
+        }
+    
+    # Perform chi-square test
+    chi2, p_value, dof, expected = chi2_contingency(contingency_table)
+    
+    # Calculate effect size (Cramér's V)
+    n = len(valid_data)
+    min_dim = min(contingency_table.shape[0] - 1, contingency_table.shape[1] - 1)
+    cramers_v = np.sqrt(chi2 / (n * min_dim))
+    
+    # Interpret effect size
+    if min_dim == 1:
+        # 2x2 table
+        if cramers_v < 0.1:
+            effect_str = "negligible"
+        elif cramers_v < 0.3:
+            effect_str = "small"
+        elif cramers_v < 0.5:
+            effect_str = "medium"
+        else:
+            effect_str = "large"
+    else:
+        # Larger tables
+        if cramers_v < 0.07:
+            effect_str = "negligible"
+        elif cramers_v < 0.21:
+            effect_str = "small"
+        elif cramers_v < 0.35:
+            effect_str = "medium"
+        else:
+            effect_str = "large"
+    
+    sig_text = "significant" if p_value < 0.05 else "not significant"
+    
+    interpretation = f"Variables are associated ({sig_text}, χ²={chi2:.2f}, p={p_value:.4f}). Effect: {effect_str} (V={cramers_v:.3f}). Table: {contingency_table.shape[0]}x{contingency_table.shape[1]}, n={n}"
+    
+    return {
+        "test_name": "Chi-Square",
+        "statistic": chi2,
+        "p_value": p_value,
+        "effect_size": cramers_v,
+        "interpretation": interpretation,
+        "n_groups": contingency_table.shape[0] * contingency_table.shape[1],
+        "n_total": n,
+        "additional_info": {
+            "chi2_statistic": chi2,
+            "degrees_of_freedom": dof,
+            "cramers_v": cramers_v,
+            "contingency_table": contingency_table.to_dict(),
+            "table_shape": contingency_table.shape
+        }
+    }
+
+
 def _safe_float_sort_key(value):
     try:
         return (0, float(value))
@@ -115,6 +758,9 @@ def _safe_float_sort_key(value):
 
 def _get_exposure_color(exposure, shade="primary"):
     """Get color for exposure type from predefined color scheme."""
+    if "color_config" in st.session_state:
+        return st.session_state["color_config"].get_exposure_color(exposure, shade)
+    # Fallback if session_state not initialized yet
     if exposure in EXPOSURE_COLORS:
         return EXPOSURE_COLORS[exposure].get(shade, EXPOSURE_COLORS[exposure]["primary"])
     return "tab:gray"
@@ -131,7 +777,7 @@ def _filter_df_by_exposure(df, exposure):
 
 
 def _group_label(record):
-    return f"{record['exposure']}_{record['concentration']}"
+    return f"{record.get('exposure', 'unknown')}_{record.get('concentration', 'unknown')}"
 
 
 def _pretty_metric_label(name):
@@ -190,6 +836,11 @@ def _interpolate_to_relative_grid(time_ms, values, n_points=INTERP_POINTS):
 def _aggregate_group_profiles(records, time_key, value_key, n_points=INTERP_POINTS):
     grouped = {}
     for record in tqdm(records, desc="Aggregating group profiles"):
+        # Validate keys exist in record
+        if time_key not in record or value_key not in record:
+            logger.debug(f"Skipping record - missing {time_key} or {value_key}")
+            continue
+            
         interpolated = _interpolate_to_relative_grid(record[time_key], record[value_key], n_points)
         if interpolated is None:
             continue
@@ -387,7 +1038,20 @@ def _load_dashboard_data(results_dir):
     logger.info(f"Loading dashboard data from {results_dir}")
     records = load_all_sample_timeseries(results_dir, verbose=False)
     logger.debug(f"Processing {len(records)} records into summary DataFrame")
-    summary_df = pd.DataFrame(records)[SUMMARY_COLUMNS].copy()
+    
+    # Create DataFrame and validate columns exist
+    full_df = pd.DataFrame(records)
+    missing_cols = [col for col in SUMMARY_COLUMNS if col not in full_df.columns]
+    
+    if missing_cols:
+        logger.warning(f"Missing columns in data: {missing_cols}")
+        available_cols = [col for col in SUMMARY_COLUMNS if col in full_df.columns]
+        if not available_cols:
+            raise ValueError(f"None of the expected SUMMARY_COLUMNS found in data. Available columns: {list(full_df.columns)}")
+        summary_df = full_df[available_cols].copy()
+    else:
+        summary_df = full_df[SUMMARY_COLUMNS].copy()
+    
     logger.info(f"Loaded {len(records)} timeseries records and created summary with {len(summary_df)} rows")
     return records, summary_df
 
@@ -409,13 +1073,15 @@ def _load_model_output_tables(output_dir):
 
 
 def _plot_fish_profile(record):
-    time_ms = np.asarray(record["time_ms"], dtype=float)
+    color_config = st.session_state.get("color_config", ColorConfig())
+    time_ms = np.asarray(record.get("time_ms", []), dtype=float)
     recording_start_ms = float(time_ms[0]) if len(time_ms) > 0 else 0.0
     time_s = (time_ms - recording_start_ms) / 1000.0
-    contraction = np.asarray(record["contraction_values"], dtype=float)
-    peak_indices = np.asarray(record["peak_indices"], dtype=int)
+    contraction = np.asarray(record.get("contraction_values", []), dtype=float)
+    peak_indices = np.asarray(record.get("peak_indices", []), dtype=int)
     sawtooth_peak = np.asarray(record.get("sawtooth_peak", []), dtype=bool)
-    peak_times_s = (np.asarray(record["peak_times_ms"], dtype=float) - recording_start_ms) / 1000.0
+    recording_start_ms_for_peaks = record.get("recording_start_ms", recording_start_ms)
+    peak_times_s = (np.asarray(record.get("peak_times_ms", []), dtype=float) - recording_start_ms_for_peaks) / 1000.0
 
     fig, ax = plt.subplots(figsize=(11, 4))
     ax.plot(time_s, contraction, linewidth=0.8, label="Contraction signal")
@@ -427,7 +1093,7 @@ def _plot_fish_profile(record):
                 ax.plot(
                     peak_times_s[normal_mask],
                     contraction[peak_indices[normal_mask]],
-                    "rv",
+                    color_config.peak_marker_color + "v",
                     markersize=6,
                     label="Detected peaks",
                 )
@@ -435,16 +1101,16 @@ def _plot_fish_profile(record):
                 ax.plot(
                     peak_times_s[sawtooth_mask],
                     contraction[peak_indices[sawtooth_mask]],
-                    "bv",
+                    color_config.sawtooth_marker_color + "v",
                     markersize=6,
                     label="Detected sawtooth peaks",
                 )
         else:
-            ax.plot(peak_times_s, contraction[peak_indices], "rv", markersize=6, label="Detected peaks")
+            ax.plot(peak_times_s, contraction[peak_indices], color_config.peak_marker_color + "v", markersize=6, label="Detected peaks")
     ax.set_xlim(left=0.0)
     ax.set_xlabel("Recording time (s)")
     ax.set_ylabel("Contraction amplitude (a.u.)")
-    ax.set_title(f"Cardiac contraction signal with detected peaks - {record['sample']}")
+    ax.set_title(f"Cardiac contraction signal with detected peaks - {record.get('sample', 'Unknown')}")
     ax.legend(loc="upper right")
     ax.grid(alpha=0.2)
     st.pyplot(fig)
@@ -452,8 +1118,9 @@ def _plot_fish_profile(record):
 
 
 def _plot_speed_profile(record):
-    speed_time = np.asarray(record["speed_time_ms"], dtype=float)
-    speed_values = np.asarray(record["speed_values"], dtype=float)
+    color_config = st.session_state.get("color_config", ColorConfig())
+    speed_time = np.asarray(record.get("speed_time_ms", []), dtype=float)
+    speed_values = np.asarray(record.get("speed_values", []), dtype=float)
     if len(speed_time) == 0:
         st.info("No speed-of-contraction profile available for this fish.")
         return
@@ -467,30 +1134,31 @@ def _plot_speed_profile(record):
     speed_time_s = (speed_time - recording_start_ms) / 1000.0
 
     fig, ax = plt.subplots(figsize=(11, 3.5))
-    ax.plot(speed_time_s, speed_values, linewidth=0.8, color="tab:orange")
+    ax.plot(speed_time_s, speed_values, linewidth=0.8, color=color_config.speed_line_color)
     ax.set_xlim(left=0.0)
     ax.set_xlabel("Recording time (s)")
     ax.set_ylabel("Contraction speed (a.u.)")
-    ax.set_title(f"Speed of contraction across recording - {record['sample']}")
+    ax.set_title(f"Speed of contraction across recording - {record.get('sample', 'Unknown')}")
     ax.grid(alpha=0.2)
     st.pyplot(fig)
     plt.close(fig)
 
 
 def _plot_fish_hrv(record):
-    contraction_time_ms = np.asarray(record["time_ms"], dtype=float)
+    color_config = st.session_state.get("color_config", ColorConfig())
+    contraction_time_ms = np.asarray(record.get("time_ms", []), dtype=float)
     recording_start_ms = float(contraction_time_ms[0]) if len(contraction_time_ms) > 0 else 0.0
-    ibi_time_s = (np.asarray(record["ibi_time_ms"], dtype=float) - recording_start_ms) / 1000.0
-    ibi_values = np.asarray(record["ibi_values_ms"], dtype=float)
+    ibi_time_s = (np.asarray(record.get("ibi_time_ms", []), dtype=float) - recording_start_ms) / 1000.0
+    ibi_values = np.asarray(record.get("ibi_values_ms", []), dtype=float)
     rolling_time_s = (
-        np.asarray(record["rolling_rmssd_time_ms"], dtype=float) - recording_start_ms
+        np.asarray(record.get("rolling_rmssd_time_ms", []), dtype=float) - recording_start_ms
     ) / 1000.0
-    rolling_values = np.asarray(record["rolling_rmssd_ms"], dtype=float)
+    rolling_values = np.asarray(record.get("rolling_rmssd_ms", []), dtype=float)
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=False)
 
     if len(ibi_time_s) > 0:
-        ax1.plot(ibi_time_s, ibi_values, "o-", markersize=3.5, linewidth=1.0, label="Inter-beat interval")
+        ax1.plot(ibi_time_s, ibi_values, "o-", markersize=3.5, linewidth=1.0, color=color_config.ibi_line_color, label="Inter-beat interval")
         ax1.set_xlim(left=0.0)
         ax1.set_xlabel("Recording time (s)")
         ax1.set_ylabel("Inter-beat interval (ms)")
@@ -498,7 +1166,7 @@ def _plot_fish_hrv(record):
         ax1.grid(alpha=0.2)
 
     if len(rolling_time_s) > 0:
-        ax2.plot(rolling_time_s, rolling_values, "o-", markersize=3.5, linewidth=1.0, color="tab:green")
+        ax2.plot(rolling_time_s, rolling_values, "o-", markersize=3.5, linewidth=1.0, color=color_config.rolling_rmssd_color)
         ax2.set_xlim(left=0.0)
         ax2.set_ylabel("Rolling root mean square of successive interval differences (ms)")
         ax2.set_xlabel("Recording time (s)")
@@ -904,6 +1572,9 @@ def _render_tab_graphs(filtered_df, group_by_exposure=False):
 
     if group_by_exposure and group_by == "concentration":
         # Show side-by-side graphs for each exposure
+        if "exposure" not in filtered_df.columns:
+            st.warning("Column 'exposure' not found in data.")
+            return
         exposures = sorted(filtered_df["exposure"].unique())
         
         if len(exposures) <= 1:
@@ -1060,6 +1731,9 @@ def _plot_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=
     
     if group_by_exposure:
         # Get unique exposures
+        if "exposure" not in filtered_df.columns:
+            st.warning("Column 'exposure' not found in data.")
+            return
         exposures = sorted(filtered_df["exposure"].unique())
         
         if len(exposures) <= 1:
@@ -1092,6 +1766,7 @@ def _plot_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=
 
 def _plot_single_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=False, show_title=True):
     """Helper to plot boxplots for a set of metrics - single exposure or combined."""
+    color_config = st.session_state.get("color_config", ColorConfig())
     group_by = "concentration"
     
     for metric in metrics:
@@ -1141,11 +1816,11 @@ def _plot_single_metric_boxplots(filtered_df, metrics, title_prefix, group_by_ex
                 tick_labels=display_labels,
                 showmeans=True,
                 patch_artist=True,
-                medianprops={"color": "tab:orange", "linewidth": 1.8},
+                medianprops={"color": color_config.boxplot_median_color, "linewidth": 1.8},
                 meanprops={
                     "marker": "D",
-                    "markerfacecolor": "tab:green",
-                    "markeredgecolor": "tab:green",
+                    "markerfacecolor": color_config.boxplot_mean_color,
+                    "markeredgecolor": color_config.boxplot_mean_color,
                     "markersize": 5,
                 },
             )
@@ -1161,12 +1836,12 @@ def _plot_single_metric_boxplots(filtered_df, metrics, title_prefix, group_by_ex
                 tick_labels=display_labels,
                 showmeans=True,
                 patch_artist=True,
-                boxprops={"facecolor": "tab:blue", "alpha": 0.25, "edgecolor": "tab:blue"},
-                medianprops={"color": "tab:orange", "linewidth": 1.8},
+                boxprops={"facecolor": color_config.boxplot_box_color, "alpha": 0.25, "edgecolor": color_config.boxplot_box_color},
+                medianprops={"color": color_config.boxplot_median_color, "linewidth": 1.8},
                 meanprops={
                     "marker": "D",
-                    "markerfacecolor": "tab:green",
-                    "markeredgecolor": "tab:green",
+                    "markerfacecolor": color_config.boxplot_mean_color,
+                    "markeredgecolor": color_config.boxplot_mean_color,
                     "markersize": 5,
                 },
             )
@@ -1181,13 +1856,13 @@ def _plot_single_metric_boxplots(filtered_df, metrics, title_prefix, group_by_ex
         ax.tick_params(axis="x", labelsize=8)
         
         legend_handles = [
-            Line2D([0], [0], color="tab:orange", lw=1.8, label="Median"),
+            Line2D([0], [0], color=color_config.boxplot_median_color, lw=1.8, label="Median"),
             Line2D(
                 [0],
                 [0],
                 marker="D",
-                color="tab:green",
-                markerfacecolor="tab:green",
+                color=color_config.boxplot_mean_color,
+                markerfacecolor=color_config.boxplot_mean_color,
                 linestyle="None",
                 label="Mean",
             ),
@@ -1195,8 +1870,8 @@ def _plot_single_metric_boxplots(filtered_df, metrics, title_prefix, group_by_ex
                 [0],
                 [0],
                 marker="*",
-                color="crimson",
-                markerfacecolor="crimson",
+                color=color_config.boxplot_significance_color,
+                markerfacecolor=color_config.boxplot_significance_color,
                 linestyle="None",
                 label=significance_label,
             ),
@@ -1209,7 +1884,7 @@ def _plot_single_metric_boxplots(filtered_df, metrics, title_prefix, group_by_ex
                 color = _get_exposure_color(exp)
                 legend_handles.insert(0, Patch(facecolor=color, edgecolor=color, alpha=0.25, label=f"{exp} IQR"))
         else:
-            legend_handles.insert(0, Patch(facecolor="tab:blue", edgecolor="tab:blue", alpha=0.25, label="IQR (Q1-Q3)"))
+            legend_handles.insert(0, Patch(facecolor=color_config.boxplot_box_color, edgecolor=color_config.boxplot_box_color, alpha=0.25, label="IQR (Q1-Q3)"))
         
         ax.legend(handles=legend_handles, loc="best", fontsize=8)
         plt.xticks(rotation=30, ha="right")
@@ -1251,33 +1926,39 @@ def _render_tab_models(output_dir, model_tables):
     tables = model_tables
 
     st.subheader("Regression summary")
-    linear_summary = tables["linear_regression_summary"]
-    logistic_summary = tables["logistic_regression_summary"]
-    trend_summary = tables["linear_trend_summary"]
+    linear_summary = tables.get("linear_regression_summary")
+    logistic_summary = tables.get("logistic_regression_summary")
+    trend_summary = tables.get("linear_trend_summary")
     if linear_summary is None and logistic_summary is None and trend_summary is None:
         st.info("No regression output files found. Run `python data_analysis.py` to generate them.")
     else:
         if linear_summary is not None and not linear_summary.empty:
-            c1, c2 = st.columns(2)
-            c1.metric("Linear R²", f"{linear_summary.iloc[0]['r_squared']:.3f}")
-            c2.metric("Linear n", int(linear_summary.iloc[0]["n_samples"]))
+            if "r_squared" in linear_summary.columns and "n_samples" in linear_summary.columns:
+                c1, c2 = st.columns(2)
+                c1.metric("Linear R²", f"{linear_summary.iloc[0]['r_squared']:.3f}")
+                c2.metric("Linear n", int(linear_summary.iloc[0]["n_samples"]))
+            else:
+                st.warning("Linear regression summary is missing expected columns.")
         if logistic_summary is not None and not logistic_summary.empty:
-            c3, c4 = st.columns(2)
-            c3.metric("Logistic accuracy (0.5)", f"{logistic_summary.iloc[0]['accuracy_at_0_5']:.3f}")
-            c4.metric("Logistic McFadden R²", f"{logistic_summary.iloc[0]['mcfadden_pseudo_r2']:.3f}")
+            if "accuracy_at_0_5" in logistic_summary.columns and "mcfadden_pseudo_r2" in logistic_summary.columns:
+                c3, c4 = st.columns(2)
+                c3.metric("Logistic accuracy (0.5)", f"{logistic_summary.iloc[0]['accuracy_at_0_5']:.3f}")
+                c4.metric("Logistic McFadden R²", f"{logistic_summary.iloc[0]['mcfadden_pseudo_r2']:.3f}")
+            else:
+                st.warning("Logistic regression summary is missing expected columns.")
         if trend_summary is not None and not trend_summary.empty:
             st.dataframe(trend_summary, use_container_width=True)
 
-        if tables["linear_regression_coefficients"] is not None:
+        if tables.get("linear_regression_coefficients") is not None:
             st.markdown("**Linear regression coefficients**")
             st.dataframe(tables["linear_regression_coefficients"], use_container_width=True)
-        if tables["logistic_regression_coefficients"] is not None:
+        if tables.get("logistic_regression_coefficients") is not None:
             st.markdown("**Logistic regression coefficients**")
             st.dataframe(tables["logistic_regression_coefficients"], use_container_width=True)
 
     st.subheader("Unsupervised learning summary")
-    cluster_summary = tables["unsupervised_cluster_summary"]
-    pca_variance = tables["unsupervised_pca_variance"]
+    cluster_summary = tables.get("unsupervised_cluster_summary")
+    pca_variance = tables.get("unsupervised_pca_variance")
     if cluster_summary is None and pca_variance is None:
         st.info("No unsupervised output files found. Run `python data_analysis.py` to generate them.")
     else:
@@ -1287,10 +1968,10 @@ def _render_tab_models(output_dir, model_tables):
         if pca_variance is not None:
             st.markdown("**PCA explained variance**")
             st.dataframe(pca_variance, use_container_width=True)
-        if tables["unsupervised_pca_loadings"] is not None:
+        if tables.get("unsupervised_pca_loadings") is not None:
             st.markdown("**PCA loadings**")
             st.dataframe(tables["unsupervised_pca_loadings"], use_container_width=True)
-        if tables["unsupervised_assignments"] is not None:
+        if tables.get("unsupervised_assignments") is not None:
             st.markdown("**Sample assignments (preview)**")
             st.dataframe(
                 tables["unsupervised_assignments"].head(20),
@@ -1299,14 +1980,29 @@ def _render_tab_models(output_dir, model_tables):
 
 def _render_tab_conclusions(filtered_df, model_tables):
     st.subheader("Conclusions for current filter selection")
-    risk_series = filtered_df["arrhythmia_risk_score"].dropna()
+    
+    # Validate arrhythmia_risk_score column exists
+    if "arrhythmia_risk_score" not in filtered_df.columns:
+        st.warning("Column 'arrhythmia_risk_score' not found in data. Some metrics may be unavailable.")
+        risk_series = pd.Series(dtype=float)
+    else:
+        risk_series = filtered_df["arrhythmia_risk_score"].dropna()
 
     k1, k2, k3 = st.columns(3)
     k1.metric("Samples in view", int(len(filtered_df)))
-    k2.metric(
-        "Arrhymia rate",
-        f"{100.0 * float(filtered_df['Arrhymia'].astype(float).mean()):.1f}%",
-    )
+    
+    # Validate Arrhymia column exists before accessing
+    if "Arrhymia" in filtered_df.columns:
+        try:
+            arrhythmia_rate = 100.0 * float(filtered_df['Arrhymia'].astype(float).mean())
+            k2.metric("Arrhymia rate", f"{arrhythmia_rate:.1f}%")
+        except (ValueError, TypeError) as e:
+            k2.metric("Arrhymia rate", "n/a")
+            st.info(f"Could not calculate arrhythmia rate: {e}")
+    else:
+        k2.metric("Arrhymia rate", "n/a")
+        st.info("Column 'Arrhymia' not found in data.")
+    
     k3.metric(
         "Mean risk score",
         f"{float(risk_series.mean()):.3f}" if len(risk_series) > 0 else "n/a",
@@ -1332,41 +2028,54 @@ def _render_tab_conclusions(filtered_df, model_tables):
         ).head(5)
         st.dataframe(top_risk[top_cols], use_container_width=True)
 
-    trend_summary = model_tables["linear_trend_summary"]
+    trend_summary = model_tables.get("linear_trend_summary")
     if trend_summary is not None and not trend_summary.empty:
-        slope = float(trend_summary.iloc[0]["slope"])
-        p_value = float(trend_summary.iloc[0]["p_value"])
-        direction = "increases" if slope > 0 else "decreases"
-        st.markdown(
-            f"- Concentration trend: risk score **{direction}** with concentration "
-            f"(slope={slope:.4f}, p={p_value:.4g})."
-        )
+        if "slope" in trend_summary.columns and "p_value" in trend_summary.columns:
+            slope = float(trend_summary.iloc[0]["slope"])
+            p_value = float(trend_summary.iloc[0]["p_value"])
+            direction = "increases" if slope > 0 else "decreases"
+            st.markdown(
+                f"- Concentration trend: risk score **{direction}** with concentration "
+                f"(slope={slope:.4f}, p={p_value:.4g})."
+            )
+        else:
+            st.info("Linear trend summary is missing expected columns.")
 
-    logistic_summary = model_tables["logistic_regression_summary"]
+    logistic_summary = model_tables.get("logistic_regression_summary")
     if logistic_summary is not None and not logistic_summary.empty:
-        acc = float(logistic_summary.iloc[0]["accuracy_at_0_5"])
-        pseudo_r2 = float(logistic_summary.iloc[0]["mcfadden_pseudo_r2"])
-        st.markdown(
-            f"- Logistic model summary: accuracy={acc:.3f}, McFadden R²={pseudo_r2:.3f}."
-        )
+        if "accuracy_at_0_5" in logistic_summary.columns and "mcfadden_pseudo_r2" in logistic_summary.columns:
+            acc = float(logistic_summary.iloc[0]["accuracy_at_0_5"])
+            pseudo_r2 = float(logistic_summary.iloc[0]["mcfadden_pseudo_r2"])
+            st.markdown(
+                f"- Logistic model summary: accuracy={acc:.3f}, McFadden R²={pseudo_r2:.3f}."
+            )
+        else:
+            st.info("Logistic regression summary is missing expected columns.")
 
-    cluster_summary = model_tables["unsupervised_cluster_summary"]
+    cluster_summary = model_tables.get("unsupervised_cluster_summary")
     if cluster_summary is not None and not cluster_summary.empty:
-        highest_cluster = cluster_summary.sort_values(
-            "arrhythmia_rate",
-            ascending=False,
-        ).iloc[0]
-        st.markdown(
-            f"- Highest-risk discovered cluster: `{highest_cluster['model']}` "
-            f"cluster {int(highest_cluster['cluster_id'])} with "
-            f"arrhythmia_rate={float(highest_cluster['arrhythmia_rate']):.3f} "
-            f"(n={int(highest_cluster['n_samples'])})."
-        )
+        required_cols = ["arrhythmia_rate", "model", "cluster_id", "n_samples"]
+        if all(col in cluster_summary.columns for col in required_cols):
+            highest_cluster = cluster_summary.sort_values(
+                "arrhythmia_rate",
+                ascending=False,
+            ).iloc[0]
+            st.markdown(
+                f"- Highest-risk discovered cluster: `{highest_cluster['model']}` "
+                f"cluster {int(highest_cluster['cluster_id'])} with "
+                f"arrhythmia_rate={float(highest_cluster['arrhythmia_rate']):.3f} "
+                f"(n={int(highest_cluster['n_samples'])})."
+            )
+        else:
+            st.info("Cluster summary is missing expected columns.")
 
 
 def _render_tab_distribution(filtered_df):
     """Render case distribution statistics with interactive bar charts."""
     st.subheader("Case Distribution Analysis")
+    
+    # Get color configuration
+    color_config = st.session_state.get("color_config", ColorConfig())
     
     # Filter options for distribution views
     st.markdown("### Distribution Filters")
@@ -1449,7 +2158,7 @@ def _render_tab_distribution(filtered_df):
             text="Count" if not show_percentages else conc_counts.apply(
                 lambda row: f"{row['Count']} ({row['Percentage']:.1f}%)", axis=1
             ),
-            color_continuous_scale="Blues"
+            color_continuous_scale=color_config.concentration_scale
         )
         fig2.update_traces(textposition="outside")
         fig2.update_layout(height=500)
@@ -1465,7 +2174,13 @@ def _render_tab_distribution(filtered_df):
     if "exposure" in display_df.columns and "concentration" in display_df.columns:
         combo_counts = display_df.groupby(["exposure", "concentration"]).size().reset_index(name="Count")
         combo_counts["Percentage"] = (combo_counts["Count"] / combo_counts["Count"].sum() * 100).round(1)
-        combo_counts["Label"] = combo_counts["exposure"] + "_" + combo_counts["concentration"].astype(str)
+        
+        # Safely convert concentration to string
+        try:
+            combo_counts["Label"] = combo_counts["exposure"] + "_" + combo_counts["concentration"].astype(str)
+        except Exception as e:
+            st.warning(f"Could not create labels: {e}")
+            combo_counts["Label"] = combo_counts["exposure"]
         
         # Sort by exposure then concentration
         try:
@@ -1520,7 +2235,7 @@ def _render_tab_distribution(filtered_df):
             text="Count" if not show_percentages else well_counts.apply(
                 lambda row: f"{row['Count']} ({row['Percentage']:.1f}%)", axis=1
             ),
-            color_continuous_scale="Greens"
+            color_continuous_scale=color_config.well_scale
         )
         fig4.update_traces(textposition="outside")
         fig4.update_layout(height=500)
@@ -1548,7 +2263,7 @@ def _render_tab_distribution(filtered_df):
             text="Count" if not show_percentages else arrhythmia_counts.apply(
                 lambda row: f"{row['Count']} ({row['Percentage']:.1f}%)", axis=1
             ),
-            color_discrete_map={"Arrhythmic": "#ff6b6b", "Normal": "#51cf66"}
+            color_discrete_map={"Arrhythmic": color_config.arrhythmic_color, "Normal": color_config.normal_color}
         )
         fig5.update_traces(textposition="outside")
         fig5.update_layout(showlegend=False, height=500)
@@ -1619,7 +2334,7 @@ def _render_tab_distribution(filtered_df):
                 color="Arrhythmia_Rate_%",
                 text="Arrhythmia_Rate_%",
                 labels={"concentration": "Concentration", "Arrhythmia_Rate_%": "Arrhythmia Rate (%)"},
-                color_continuous_scale="Reds"
+                color_continuous_scale=color_config.arrhythmia_rate_scale
             )
             fig7.update_traces(textposition="outside", texttemplate='%{text:.1f}%')
             fig7.update_layout(height=500)
@@ -1777,6 +2492,9 @@ def _render_tab_waveform_overlay(record_by_sample, all_samples):
         "for visual comparison of cardiac contraction patterns across different samples."
     )
     
+    # Get color configuration
+    color_config = st.session_state.get("color_config", ColorConfig())
+    
     # Sample selection widget
     selected_samples = st.multiselect(
         "Select samples to overlay",
@@ -1814,13 +2532,8 @@ def _render_tab_waveform_overlay(record_by_sample, all_samples):
     summary_data = []
     color_idx = 0
     
-    # Define color palette (expand beyond EXPOSURE_COLORS)
-    color_palette = [
-        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-        "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
-        "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
-        "#c49c94", "#f7b6d2", "#c7c7c7", "#dbdb8d", "#9edae5"
-    ]
+    # Use color palette from ColorConfig
+    color_palette = color_config.waveform_palette
     
     for sample_id in selected_samples:
         if sample_id not in record_by_sample:
@@ -1937,6 +2650,43 @@ def main():
         st.session_state["results_dir"] = default_results
     if "output_dir" not in st.session_state:
         st.session_state["output_dir"] = default_output
+    if "color_config" not in st.session_state:
+        st.session_state["color_config"] = ColorConfig()
+    if "stats_registry" not in st.session_state:
+        st.session_state["stats_registry"] = StatisticalTestRegistry()
+        
+        # Register common statistical tests
+        registry = st.session_state["stats_registry"]
+        registry.register(
+            "Pearson Correlation",
+            _test_pearson_correlation,
+            "Tests linear relationship between two continuous variables"
+        )
+        registry.register(
+            "Spearman Correlation",
+            _test_spearman_correlation,
+            "Tests monotonic relationship between two variables (non-parametric)"
+        )
+        registry.register(
+            "Mann-Whitney U",
+            _test_mann_whitney_u,
+            "Non-parametric comparison of two independent groups (alternative to t-test)"
+        )
+        registry.register(
+            "Kruskal-Wallis",
+            _test_kruskal_wallis,
+            "Non-parametric comparison of 3+ independent groups (alternative to ANOVA)"
+        )
+        registry.register(
+            "Wilcoxon Signed-Rank",
+            _test_wilcoxon_signed_rank,
+            "Non-parametric test for paired samples (before/after comparisons)"
+        )
+        registry.register(
+            "Chi-Square",
+            _test_chi_square,
+            "Tests independence between two categorical variables"
+        )
 
 
     results_dir = os.path.abspath(st.session_state["results_dir"])
@@ -1950,25 +2700,51 @@ def main():
         st.error(f"Failed to load data from {results_dir}: {exc}")
         st.stop()
 
-    record_by_sample = {record["sample"]: record for record in records}
+    record_by_sample = {record.get("sample", f"unknown_{i}"): record for i, record in enumerate(records)}
 
     st.sidebar.header("Filters")
+    
+    # Validate exposure column exists
+    if "exposure" not in summary_df.columns:
+        st.error("Required column 'exposure' not found in data. Cannot proceed.")
+        return
+    
     exposures = sorted(summary_df["exposure"].unique().tolist())
     selected_exposures = st.sidebar.multiselect("Exposure", exposures, default=exposures)
 
     filtered_df = summary_df[summary_df["exposure"].isin(selected_exposures)].copy()
 
-    concentration_options = sorted(
-        filtered_df["concentration"].astype(str).unique().tolist(),
-        key=_safe_float_sort_key,
-    )
+    # Validate concentration column exists
+    if "concentration" not in filtered_df.columns:
+        st.error("Required column 'concentration' not found in data. Cannot proceed.")
+        return
+    
+    try:
+        concentration_options = sorted(
+            filtered_df["concentration"].astype(str).unique().tolist(),
+            key=_safe_float_sort_key,
+        )
+    except Exception as e:
+        st.warning(f"Could not convert concentration values: {e}")
+        concentration_options = filtered_df["concentration"].unique().tolist()
+    
     selected_concentrations = st.sidebar.multiselect(
         "Dose (concentration)", concentration_options, default=concentration_options
     )
-    filtered_df = filtered_df[
-        filtered_df["concentration"].astype(str).isin(selected_concentrations)
-    ].copy()
+    
+    try:
+        filtered_df = filtered_df[
+            filtered_df["concentration"].astype(str).isin(selected_concentrations)
+        ].copy()
+    except Exception as e:
+        st.warning(f"Could not filter by concentration: {e}")
+        filtered_df = filtered_df.copy()
 
+    # Validate sample column exists
+    if "sample" not in filtered_df.columns:
+        st.error("Required column 'sample' not found in data. Cannot proceed.")
+        return
+    
     removable_cases = sorted(filtered_df["sample"].tolist())
     default_excluded_cases = [
         sample_name for sample_name in DEFAULT_EXCLUDED_CASES
@@ -2002,6 +2778,114 @@ def main():
         value=False,
         help="When enabled, show separate side-by-side graphs for each exposure (Phe and Terf)"
     )
+    
+    # Color Settings
+    with st.sidebar.expander("🎨 Color Settings", expanded=False):
+        color_config = st.session_state["color_config"]
+        
+        st.markdown("**Matplotlib Colors**")
+        col1, col2 = st.columns(2)
+        with col1:
+            new_peak_color = st.color_picker(
+                "Peak Markers",
+                color_config.peak_marker_color,
+                key="peak_marker_color_picker"
+            )
+            if new_peak_color != color_config.peak_marker_color:
+                color_config.peak_marker_color = new_peak_color
+            
+            new_speed_color = st.color_picker(
+                "Speed Line",
+                color_config.speed_line_color,
+                key="speed_line_color_picker"
+            )
+            if new_speed_color != color_config.speed_line_color:
+                color_config.speed_line_color = new_speed_color
+            
+            new_rolling_rmssd_color = st.color_picker(
+                "Rolling RMSSD",
+                color_config.rolling_rmssd_color,
+                key="rolling_rmssd_color_picker"
+            )
+            if new_rolling_rmssd_color != color_config.rolling_rmssd_color:
+                color_config.rolling_rmssd_color = new_rolling_rmssd_color
+        
+        with col2:
+            new_sawtooth_color = st.color_picker(
+                "Sawtooth Markers",
+                color_config.sawtooth_marker_color,
+                key="sawtooth_marker_color_picker"
+            )
+            if new_sawtooth_color != color_config.sawtooth_marker_color:
+                color_config.sawtooth_marker_color = new_sawtooth_color
+            
+            new_ibi_color = st.color_picker(
+                "IBI Line",
+                color_config.ibi_line_color,
+                key="ibi_line_color_picker"
+            )
+            if new_ibi_color != color_config.ibi_line_color:
+                color_config.ibi_line_color = new_ibi_color
+        
+        st.markdown("**Boxplot Colors**")
+        col3, col4 = st.columns(2)
+        with col3:
+            new_median_color = st.color_picker(
+                "Median Line",
+                color_config.boxplot_median_color,
+                key="boxplot_median_color_picker"
+            )
+            if new_median_color != color_config.boxplot_median_color:
+                color_config.boxplot_median_color = new_median_color
+            
+            new_box_color = st.color_picker(
+                "Box Color",
+                color_config.boxplot_box_color,
+                key="boxplot_box_color_picker"
+            )
+            if new_box_color != color_config.boxplot_box_color:
+                color_config.boxplot_box_color = new_box_color
+        
+        with col4:
+            new_mean_color = st.color_picker(
+                "Mean Line",
+                color_config.boxplot_mean_color,
+                key="boxplot_mean_color_picker"
+            )
+            if new_mean_color != color_config.boxplot_mean_color:
+                color_config.boxplot_mean_color = new_mean_color
+            
+            new_sig_color = st.color_picker(
+                "Significance",
+                color_config.boxplot_significance_color,
+                key="boxplot_significance_color_picker"
+            )
+            if new_sig_color != color_config.boxplot_significance_color:
+                color_config.boxplot_significance_color = new_sig_color
+        
+        st.markdown("**Arrhythmia Status Colors**")
+        col5, col6 = st.columns(2)
+        with col5:
+            new_arrhythmic_color = st.color_picker(
+                "Arrhythmic",
+                color_config.arrhythmic_color,
+                key="arrhythmic_color_picker"
+            )
+            if new_arrhythmic_color != color_config.arrhythmic_color:
+                color_config.arrhythmic_color = new_arrhythmic_color
+        
+        with col6:
+            new_normal_color = st.color_picker(
+                "Normal",
+                color_config.normal_color,
+                key="normal_color_picker"
+            )
+            if new_normal_color != color_config.normal_color:
+                color_config.normal_color = new_normal_color
+        
+        if st.button("Reset to Defaults", key="reset_colors"):
+            st.session_state["color_config"] = ColorConfig()
+            st.rerun()
     
     with st.sidebar.expander("Variables & abbreviations", expanded=False):
         st.markdown(VARIABLE_GLOSSARY_MARKDOWN)
@@ -2049,8 +2933,16 @@ def main():
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Fish samples", len(filtered_df))
-    c2.metric("Exposure groups", int(filtered_df["exposure"].nunique()))
-    c3.metric("Dose groups", int(filtered_df["concentration"].nunique()))
+    
+    if "exposure" in filtered_df.columns:
+        c2.metric("Exposure groups", int(filtered_df["exposure"].nunique()))
+    else:
+        c2.metric("Exposure groups", "n/a")
+    
+    if "concentration" in filtered_df.columns:
+        c3.metric("Dose groups", int(filtered_df["concentration"].nunique()))
+    else:
+        c3.metric("Dose groups", "n/a")
 
     
     if not selected_tabs:
