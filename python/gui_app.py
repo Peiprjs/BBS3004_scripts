@@ -6,6 +6,7 @@ Usage:
 
 import logging
 import os
+import re
 from tqdm import tqdm
 
 import matplotlib.pyplot as plt
@@ -57,6 +58,82 @@ EXPOSURE_COLORS = {
     "Terf": {"primary": "#d62728", "light": "#fc9272", "dark": "#a50f15"},
     "0": {"primary": "#7f7f7f", "light": "#969696", "dark": "#525252"},
 }
+EXPOSURE_DISPLAY_NAMES = {
+    "Phe": "Phenanthrene",
+    "Terf": "Terfenadine",
+    "0": "Control",
+}
+EXPOSURE_LABEL_TO_KEY = {
+    **{key: key for key in EXPOSURE_DISPLAY_NAMES},
+    **{display: key for key, display in EXPOSURE_DISPLAY_NAMES.items()},
+}
+
+
+def _display_exposure_name(exposure):
+    if exposure is None:
+        return exposure
+    return EXPOSURE_DISPLAY_NAMES.get(exposure, exposure)
+
+
+def _canonical_exposure_name(exposure_label):
+    if exposure_label is None:
+        return exposure_label
+    return EXPOSURE_LABEL_TO_KEY.get(exposure_label, exposure_label)
+
+
+def _display_sample_name(sample_name):
+    if not isinstance(sample_name, str):
+        return sample_name
+    for exposure_key, display_name in EXPOSURE_DISPLAY_NAMES.items():
+        if exposure_key == "0":
+            continue
+        prefix = f"{exposure_key}_"
+        if sample_name.startswith(prefix):
+            return f"{display_name}_{sample_name[len(prefix):]}"
+    return sample_name
+
+
+def _display_group_label(label):
+    if not isinstance(label, str):
+        return label
+    if "_" not in label:
+        return _display_exposure_name(label)
+    exposure, remainder = label.split("_", 1)
+    return f"{_display_exposure_name(exposure)}_{remainder}"
+
+
+def _display_column_name(name):
+    if not isinstance(name, str):
+        return name
+    display_name = re.sub(
+        r"(?i)(?<![A-Za-z])terf(?![A-Za-z])",
+        "terfenadine",
+        name,
+    )
+    display_name = re.sub(
+        r"(?i)(?<![A-Za-z])phe(?![A-Za-z])",
+        "phenanthrene",
+        display_name,
+    )
+    return display_name
+
+
+def _prepare_display_dataframe(df):
+    display_df = df.copy()
+    if "sample" in display_df.columns:
+        display_df["sample"] = display_df["sample"].map(_display_sample_name)
+    if "exposure" in display_df.columns:
+        display_df["exposure"] = display_df["exposure"].map(_display_exposure_name)
+    return display_df
+
+
+def _plot_title_text(title, show_titles):
+    return title if show_titles else None
+
+
+def _set_matplotlib_title(ax, title, show_titles):
+    if show_titles:
+        ax.set_title(title)
 
 
 class ColorConfig:
@@ -105,8 +182,8 @@ DEFAULT_EXCLUDED_CASES = [
     "Terf_20_2.3",
 ]
 VARIABLE_GLOSSARY_MARKDOWN = """
-- `sample`: sample identifier (`Exposure_Concentration_Well.Fish`).
-- `exposure`: treatment family/group (e.g., `Phe`, `Terf`).
+- `sample`: sample identifier (`Phenanthrene_Concentration_Well.Fish` or `Terfenadine_Concentration_Well.Fish`).
+- `exposure`: treatment family/group (e.g., `Phenanthrene`, `Terfenadine`).
 - `concentration`: dose level.
 - `well`, `fish`: plate well index and fish index.
 - `n_peaks`: number of detected contraction peaks.
@@ -758,6 +835,7 @@ def _safe_float_sort_key(value):
 
 def _get_exposure_color(exposure, shade="primary"):
     """Get color for exposure type from predefined color scheme."""
+    exposure = _canonical_exposure_name(exposure)
     if "color_config" in st.session_state:
         return st.session_state["color_config"].get_exposure_color(exposure, shade)
     # Fallback if session_state not initialized yet
@@ -768,11 +846,13 @@ def _get_exposure_color(exposure, shade="primary"):
 
 def _filter_records_by_exposure(records, exposure):
     """Filter records list by exposure type."""
+    exposure = _canonical_exposure_name(exposure)
     return [r for r in records if r.get("exposure") == exposure]
 
 
 def _filter_df_by_exposure(df, exposure):
     """Filter dataframe by exposure type."""
+    exposure = _canonical_exposure_name(exposure)
     return df[df["exposure"] == exposure].copy()
 
 
@@ -809,6 +889,10 @@ def _pretty_group_label(name):
         "exposure": "exposure condition",
     }
     return label_map.get(name, name.replace("_", " "))
+
+
+def _pretty_exposure_group_name(exposure):
+    return _display_exposure_name(exposure)
 
 
 def _interpolate_to_relative_grid(time_ms, values, n_points=INTERP_POINTS):
@@ -1002,13 +1086,13 @@ def _run_all_anova_tests(df, metrics):
         phe_result = _calculate_anova_for_metric(df, metric, exposure_filter="Phe")
         if phe_result:
             phe_result["metric"] = metric
-            phe_result["test_type"] = "Phe only (by concentration)"
+            phe_result["test_type"] = "Phenanthrene only (by concentration)"
             results["phe_only"].append(phe_result)
         
         terf_result = _calculate_anova_for_metric(df, metric, exposure_filter="Terf")
         if terf_result:
             terf_result["metric"] = metric
-            terf_result["test_type"] = "Terf only (by concentration)"
+            terf_result["test_type"] = "Terfenadine only (by concentration)"
             results["terf_only"].append(terf_result)
         
         both_result = _calculate_anova_for_metric(df, metric, exposure_filter=None, group_by_exposure=False)
@@ -1072,7 +1156,7 @@ def _load_model_output_tables(output_dir):
     return tables
 
 
-def _plot_fish_profile(record):
+def _plot_fish_profile(record, show_titles=True):
     color_config = st.session_state.get("color_config", ColorConfig())
     time_ms = np.asarray(record.get("time_ms", []), dtype=float)
     recording_start_ms = float(time_ms[0]) if len(time_ms) > 0 else 0.0
@@ -1122,14 +1206,19 @@ def _plot_fish_profile(record):
     ax.set_xlim(left=0.0)
     ax.set_xlabel("Recording time (s)")
     ax.set_ylabel("Contraction amplitude (a.u.)")
-    ax.set_title(f"Cardiac contraction signal with detected peaks - {record.get('sample', 'Unknown')}")
+    sample_label = _display_sample_name(record.get("sample", "Unknown"))
+    _set_matplotlib_title(
+        ax,
+        f"Cardiac contraction signal with detected peaks - {sample_label}",
+        show_titles,
+    )
     ax.legend(loc="upper right")
     ax.grid(alpha=0.2)
     st.pyplot(fig)
     plt.close(fig)
 
 
-def _plot_speed_profile(record):
+def _plot_speed_profile(record, show_titles=True):
     color_config = st.session_state.get("color_config", ColorConfig())
     speed_time = np.asarray(record.get("speed_time_ms", []), dtype=float)
     speed_values = np.asarray(record.get("speed_values", []), dtype=float)
@@ -1150,13 +1239,18 @@ def _plot_speed_profile(record):
     ax.set_xlim(left=0.0)
     ax.set_xlabel("Recording time (s)")
     ax.set_ylabel("Contraction speed (a.u.)")
-    ax.set_title(f"Speed of contraction across recording - {record.get('sample', 'Unknown')}")
+    sample_label = _display_sample_name(record.get("sample", "Unknown"))
+    _set_matplotlib_title(
+        ax,
+        f"Speed of contraction across recording - {sample_label}",
+        show_titles,
+    )
     ax.grid(alpha=0.2)
     st.pyplot(fig)
     plt.close(fig)
 
 
-def _plot_fish_hrv(record):
+def _plot_fish_hrv(record, show_titles=True):
     color_config = st.session_state.get("color_config", ColorConfig())
     contraction_time_ms = np.asarray(record.get("time_ms", []), dtype=float)
     recording_start_ms = float(contraction_time_ms[0]) if len(contraction_time_ms) > 0 else 0.0
@@ -1174,7 +1268,11 @@ def _plot_fish_hrv(record):
         ax1.set_xlim(left=0.0)
         ax1.set_xlabel("Recording time (s)")
         ax1.set_ylabel("Inter-beat interval (ms)")
-        ax1.set_title("Beat-to-beat inter-beat interval across recording")
+        _set_matplotlib_title(
+            ax1,
+            "Beat-to-beat inter-beat interval across recording",
+            show_titles,
+        )
         ax1.grid(alpha=0.2)
 
     if len(rolling_time_s) > 0:
@@ -1182,9 +1280,11 @@ def _plot_fish_hrv(record):
         ax2.set_xlim(left=0.0)
         ax2.set_ylabel("Rolling root mean square of successive interval differences (ms)")
         ax2.set_xlabel("Recording time (s)")
-        ax2.set_title(
+        _set_matplotlib_title(
+            ax2,
             "Short-term heart rate variability trend "
-            "(rolling root mean square of successive interval differences)"
+            "(rolling root mean square of successive interval differences)",
+            show_titles,
         )
         ax2.grid(alpha=0.2)
     else:
@@ -1201,7 +1301,7 @@ def _plot_fish_hrv(record):
     plt.close(fig)
 
 
-def _plot_group_aggregate(grid_pct, aggregate, title, y_label, group_by_exposure=False):
+def _plot_group_aggregate(grid_pct, aggregate, title, y_label, group_by_exposure=False, show_titles=True):
     fig, ax = plt.subplots(figsize=(11, 4.5))
     for label in sorted(aggregate.keys()):
         mean = aggregate[label]["mean"]
@@ -1211,16 +1311,22 @@ def _plot_group_aggregate(grid_pct, aggregate, title, y_label, group_by_exposure
         # Extract exposure from label (format: "Exposure_Concentration")
         if group_by_exposure:
             exposure = label.split("_")[0] if "_" in label else "0"
-            color = _get_exposure_color(exposure)
-            ax.plot(grid_pct, mean, linewidth=1.5, label=f"{label} (n={n})", color=color)
+            color = _get_exposure_color(_canonical_exposure_name(exposure))
+            ax.plot(
+                grid_pct,
+                mean,
+                linewidth=1.5,
+                label=f"{_display_group_label(label)} (n={n})",
+                color=color,
+            )
             ax.fill_between(grid_pct, mean - std, mean + std, alpha=0.2, color=color)
         else:
-            ax.plot(grid_pct, mean, linewidth=1.5, label=f"{label} (n={n})")
+            ax.plot(grid_pct, mean, linewidth=1.5, label=f"{_display_group_label(label)} (n={n})")
             ax.fill_between(grid_pct, mean - std, mean + std, alpha=0.2)
 
     ax.set_xlabel("Relative progress through recording (%)")
     ax.set_ylabel(y_label)
-    ax.set_title(title)
+    _set_matplotlib_title(ax, title, show_titles)
     ax.grid(alpha=0.2)
     ax.legend(loc="best", fontsize=8)
     st.pyplot(fig)
@@ -1233,18 +1339,17 @@ def _apply_text_wrap_css():
 
 
 
-def _render_tab_fish(selected_sample, record_by_sample):
+def _render_tab_fish(selected_sample, record_by_sample, show_titles=True):
     fish_record = record_by_sample[selected_sample]
-    _plot_fish_profile(fish_record)
-    _plot_fish_hrv(fish_record)
+    _plot_fish_profile(fish_record, show_titles=show_titles)
+    _plot_fish_hrv(fish_record, show_titles=show_titles)
 
-def _render_tab_dose(filtered_records, group_by_exposure=False):
+
+def _render_tab_dose(filtered_records, group_by_exposure=False, show_titles=True):
     if group_by_exposure:
-        # Get unique exposures from filtered records
         exposures = sorted(set(r.get("exposure", "0") for r in filtered_records))
-        
+
         if len(exposures) <= 1:
-            # Only one exposure, show single graph
             grid_pct, aggregate = _aggregate_group_profiles(
                 filtered_records,
                 time_key="time_ms",
@@ -1259,9 +1364,9 @@ def _render_tab_dose(filtered_records, group_by_exposure=False):
                     title="Mean contraction waveform by exposure and dose (+/-1 SD)",
                     y_label="Contraction amplitude (a.u.)",
                     group_by_exposure=True,
+                    show_titles=show_titles,
                 )
         else:
-            # Multiple exposures, show side-by-side
             cols = st.columns(len(exposures))
             for idx, exposure in enumerate(exposures):
                 exposure_records = _filter_records_by_exposure(filtered_records, exposure)
@@ -1272,17 +1377,17 @@ def _render_tab_dose(filtered_records, group_by_exposure=False):
                 )
                 with cols[idx]:
                     if not aggregate:
-                        st.info(f"Not enough data for {exposure}.")
+                        st.info(f"Not enough data for {_display_exposure_name(exposure)}.")
                     else:
                         _plot_group_aggregate(
                             grid_pct,
                             aggregate,
-                            title=f"{exposure} - Contraction waveform by dose (+/-1 SD)",
+                            title=f"{_display_exposure_name(exposure)} - Contraction waveform by dose (+/-1 SD)",
                             y_label="Contraction amplitude (a.u.)",
                             group_by_exposure=True,
+                            show_titles=show_titles,
                         )
     else:
-        # Original behavior - show all together with color coding
         grid_pct, aggregate = _aggregate_group_profiles(
             filtered_records,
             time_key="time_ms",
@@ -1297,15 +1402,15 @@ def _render_tab_dose(filtered_records, group_by_exposure=False):
                 title="Mean contraction waveform by exposure and dose (+/-1 SD)",
                 y_label="Contraction amplitude (a.u.)",
                 group_by_exposure=True,
+                show_titles=show_titles,
             )
 
-def _render_tab_hrv(filtered_records, group_by_exposure=False):
+
+def _render_tab_hrv(filtered_records, group_by_exposure=False, show_titles=True):
     if group_by_exposure:
-        # Get unique exposures from filtered records
         exposures = sorted(set(r.get("exposure", "0") for r in filtered_records))
-        
+
         if len(exposures) <= 1:
-            # Only one exposure, show single graph
             grid_pct, aggregate = _aggregate_group_profiles(
                 filtered_records,
                 time_key="rolling_rmssd_time_ms",
@@ -1326,9 +1431,9 @@ def _render_tab_hrv(filtered_records, group_by_exposure=False):
                     ),
                     y_label="Rolling root mean square of successive interval differences (ms)",
                     group_by_exposure=True,
+                    show_titles=show_titles,
                 )
         else:
-            # Multiple exposures, show side-by-side
             cols = st.columns(len(exposures))
             for idx, exposure in enumerate(exposures):
                 exposure_records = _filter_records_by_exposure(filtered_records, exposure)
@@ -1339,17 +1444,17 @@ def _render_tab_hrv(filtered_records, group_by_exposure=False):
                 )
                 with cols[idx]:
                     if not aggregate:
-                        st.info(f"Not enough data for {exposure}.")
+                        st.info(f"Not enough data for {_display_exposure_name(exposure)}.")
                     else:
                         _plot_group_aggregate(
                             grid_pct,
                             aggregate,
-                            title=f"{exposure} - Rolling RMSSD by dose (+/-1 SD)",
+                            title=f"{_display_exposure_name(exposure)} - Rolling RMSSD by dose (+/-1 SD)",
                             y_label="Rolling root mean square of successive interval differences (ms)",
                             group_by_exposure=True,
+                            show_titles=show_titles,
                         )
     else:
-        # Original behavior - show all together with color coding
         grid_pct, aggregate = _aggregate_group_profiles(
             filtered_records,
             time_key="rolling_rmssd_time_ms",
@@ -1370,11 +1475,14 @@ def _render_tab_hrv(filtered_records, group_by_exposure=False):
                 ),
                 y_label="Rolling root mean square of successive interval differences (ms)",
                 group_by_exposure=True,
+                show_titles=show_titles,
             )
 
 
 def _render_tab_data_table(filtered_df):
-    st.dataframe(filtered_df.reset_index(drop=True), use_container_width=True)
+    display_df = _prepare_display_dataframe(filtered_df)
+    display_df = display_df.rename(columns=_display_column_name)
+    st.dataframe(display_df.reset_index(drop=True), use_container_width=True)
 
 def _render_tab_statistical_analysis(filtered_df):
     st.subheader("Statistical Analysis")
@@ -1403,14 +1511,14 @@ def _render_tab_statistical_analysis(filtered_df):
             anova_results = _run_all_anova_tests(filtered_df, available_anova_metrics)
         
         tabs = st.tabs([
-            "Phe Only (by Concentration)",
-            "Terf Only (by Concentration)",
+            "Phenanthrene Only (by Concentration)",
+            "Terfenadine Only (by Concentration)",
             "Both Exposures (by Concentration)",
             "Grouped by Exposure"
         ])
         
         with tabs[0]:
-            st.markdown("**ANOVA for Phe exposure only, grouped by concentration**")
+            st.markdown("**ANOVA for Phenanthrene exposure only, grouped by concentration**")
             if anova_results["phe_only"] is not None:
                 display_df = anova_results["phe_only"][["metric", "F-statistic", "p-value", 
                                                           "df_between", "df_within", "eta_squared", 
@@ -1429,7 +1537,7 @@ def _render_tab_statistical_analysis(filtered_df):
                 st.info("Not enough data for ANOVA test")
         
         with tabs[1]:
-            st.markdown("**ANOVA for Terf exposure only, grouped by concentration**")
+            st.markdown("**ANOVA for Terfenadine exposure only, grouped by concentration**")
             if anova_results["terf_only"] is not None:
                 display_df = anova_results["terf_only"][["metric", "F-statistic", "p-value", 
                                                            "df_between", "df_within", "eta_squared", 
@@ -1467,7 +1575,7 @@ def _render_tab_statistical_analysis(filtered_df):
                 st.info("Not enough data for ANOVA test")
         
         with tabs[3]:
-            st.markdown("**ANOVA comparing Phe vs Terf exposures**")
+            st.markdown("**ANOVA comparing Phenanthrene vs Terfenadine exposures**")
             if anova_results["grouped_by_exposure"] is not None:
                 display_df = anova_results["grouped_by_exposure"][["metric", "F-statistic", "p-value", 
                                                                      "df_between", "df_within", "eta_squared", 
@@ -1536,7 +1644,7 @@ def _render_tab_statistical_analysis(filtered_df):
         if len(values) == 0:
             continue
         grouped_values.append(values)
-        labels.append(str(name))
+        labels.append(_display_exposure_name(str(name)) if group_by == "exposure" else str(name))
 
     if grouped_values:
         significance_flags, p_values, significance_label = _group_significance(
@@ -1554,7 +1662,7 @@ def _render_tab_statistical_analysis(filtered_df):
         st.dataframe(stat_df, use_container_width=True)
 
 
-def _render_tab_graphs(filtered_df, group_by_exposure=False):
+def _render_tab_graphs(filtered_df, group_by_exposure=False, show_titles=True):
     numeric_cols = [
         col for col in filtered_df.columns
         if pd.api.types.is_numeric_dtype(filtered_df[col])
@@ -1591,21 +1699,28 @@ def _render_tab_graphs(filtered_df, group_by_exposure=False):
         
         if len(exposures) <= 1:
             # Only one exposure, show single graph
-            _render_single_graph(filtered_df, metric, group_by, group_by_exposure=True)
+            _render_single_graph(filtered_df, metric, group_by, group_by_exposure=True, show_titles=show_titles)
         else:
             # Multiple exposures, show side-by-side
             cols = st.columns(len(exposures))
             for idx, exposure in enumerate(exposures):
                 exposure_df = _filter_df_by_exposure(filtered_df, exposure)
                 with cols[idx]:
-                    st.markdown(f"**{exposure}**")
-                    _render_single_graph(exposure_df, metric, group_by, group_by_exposure=True, exposure=exposure)
+                    st.markdown(f"**{_display_exposure_name(exposure)}**")
+                    _render_single_graph(
+                        exposure_df,
+                        metric,
+                        group_by,
+                        group_by_exposure=True,
+                        exposure=exposure,
+                        show_titles=show_titles,
+                    )
     else:
         # Original behavior
-        _render_single_graph(filtered_df, metric, group_by, group_by_exposure=False)
+        _render_single_graph(filtered_df, metric, group_by, group_by_exposure=False, show_titles=show_titles)
 
 
-def _render_single_graph(filtered_df, metric, group_by, group_by_exposure=False, exposure=None):
+def _render_single_graph(filtered_df, metric, group_by, group_by_exposure=False, exposure=None, show_titles=True):
     """Helper function to render a single boxplot graph."""
     grouped_values = []
     labels = []
@@ -1691,8 +1806,8 @@ def _render_single_graph(filtered_df, metric, group_by, group_by_exposure=False,
         group_label = _pretty_group_label(group_by)
         title = f"Distribution of {metric_label} by {group_label}"
         if exposure:
-            title = f"{exposure} - {title}"
-        ax.set_title(title)
+            title = f"{_display_exposure_name(exposure)} - {title}"
+        _set_matplotlib_title(ax, title, show_titles)
         ax.set_xlabel(group_label.capitalize())
         ax.set_ylabel(metric_label)
         ax.grid(axis="y", alpha=0.2)
@@ -1725,7 +1840,7 @@ def _render_single_graph(filtered_df, metric, group_by, group_by_exposure=False,
             unique_exposures = sorted(set(exposures_for_colors))
             for exp in unique_exposures:
                 color = _get_exposure_color(exp)
-                legend_handles.insert(0, Patch(facecolor=color, edgecolor=color, alpha=0.25, label=f"{exp} IQR"))
+                legend_handles.insert(0, Patch(facecolor=color, edgecolor=color, alpha=0.25, label=f"{_display_exposure_name(exp)} IQR"))
         else:
             legend_handles.insert(0, Patch(facecolor="tab:blue", edgecolor="tab:blue", alpha=0.25, label="IQR (Q1-Q3)"))
         
@@ -1737,7 +1852,7 @@ def _render_single_graph(filtered_df, metric, group_by, group_by_exposure=False,
 
 
     
-def _plot_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=False):
+def _plot_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=False, show_titles=True):
     """Helper to plot boxplots for a set of metrics grouped by concentration."""
     group_by = "concentration"
     
@@ -1750,7 +1865,7 @@ def _plot_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=
         
         if len(exposures) <= 1:
             # Only one exposure, show single set of plots with color-coding
-            _plot_single_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=True)
+            _plot_single_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=True, show_title=show_titles)
         else:
             # Multiple exposures, show side-by-side for each metric
             for metric in metrics:
@@ -1763,7 +1878,7 @@ def _plot_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=
                 for idx, exposure in enumerate(exposures):
                     exposure_df = _filter_df_by_exposure(filtered_df, exposure)
                     with cols[idx]:
-                        st.caption(f"{exposure} Exposure")
+                        st.caption(f"{_display_exposure_name(exposure)} Exposure")
                         _plot_single_metric_boxplots(
                             exposure_df, 
                             [metric], 
@@ -1773,7 +1888,7 @@ def _plot_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=
                         )
     else:
         # Original behavior - show all together without color coding
-        _plot_single_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=False)
+        _plot_single_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=False, show_title=show_titles)
 
 
 def _plot_single_metric_boxplots(filtered_df, metrics, title_prefix, group_by_exposure=False, show_title=True):
@@ -1904,26 +2019,38 @@ def _plot_single_metric_boxplots(filtered_df, metrics, title_prefix, group_by_ex
         st.pyplot(fig)
         plt.close(fig)
 
-def _render_tab_contraction_amplitude(filtered_df, group_by_exposure=False):
+def _render_tab_contraction_amplitude(filtered_df, group_by_exposure=False, show_titles=True):
     st.subheader("Contraction Amplitude Analysis")
     metrics = ["contraction_amplitude_mean", "contraction_amplitude_range"]
-    _plot_metric_boxplots(filtered_df, metrics, "Amplitude Distribution", group_by_exposure=group_by_exposure)
+    _plot_metric_boxplots(
+        filtered_df,
+        metrics,
+        "Amplitude Distribution",
+        group_by_exposure=group_by_exposure,
+        show_titles=show_titles,
+    )
     
-def _render_tab_contraction_force(filtered_df, selected_sample, record_by_sample, group_by_exposure=False):
+def _render_tab_contraction_force(filtered_df, selected_sample, record_by_sample, group_by_exposure=False, show_titles=True):
     st.subheader("Contraction Force Analysis")
-    st.markdown(f"**Force Profile for {selected_sample}**")
+    st.markdown(f"**Force Profile for {_display_sample_name(selected_sample)}**")
     if selected_sample in record_by_sample:
         fish_record = record_by_sample[selected_sample]
-        _plot_speed_profile(fish_record)
+        _plot_speed_profile(fish_record, show_titles=show_titles)
         
     metrics = [
         "force_of_contraction_mean_au",
         "force_of_contraction_std_au",
         "force_of_contraction_peak_au"
     ]
-    _plot_metric_boxplots(filtered_df, metrics, "Force Distribution", group_by_exposure=group_by_exposure)
+    _plot_metric_boxplots(
+        filtered_df,
+        metrics,
+        "Force Distribution",
+        group_by_exposure=group_by_exposure,
+        show_titles=show_titles,
+    )
     
-def _render_tab_transients(filtered_df, group_by_exposure=False):
+def _render_tab_transients(filtered_df, group_by_exposure=False, show_titles=True):
     st.subheader("Transients Analysis")
     metrics = [
         "transient_rise_time_mean_ms",
@@ -1931,7 +2058,13 @@ def _render_tab_transients(filtered_df, group_by_exposure=False):
         "transient_duration_mean_ms",
         "transient_fwhm_mean_ms"
     ]
-    _plot_metric_boxplots(filtered_df, metrics, "Transient Distribution", group_by_exposure=group_by_exposure)
+    _plot_metric_boxplots(
+        filtered_df,
+        metrics,
+        "Transient Distribution",
+        group_by_exposure=group_by_exposure,
+        show_titles=show_titles,
+    )
 
 def _render_tab_models(output_dir, model_tables):
     st.caption(f"Model outputs loaded from `{output_dir}`")
@@ -1959,14 +2092,14 @@ def _render_tab_models(output_dir, model_tables):
             else:
                 st.warning("Logistic regression summary is missing expected columns.")
         if trend_summary is not None and not trend_summary.empty:
-            st.dataframe(trend_summary, use_container_width=True)
+            st.dataframe(trend_summary.rename(columns=_display_column_name), use_container_width=True)
 
         if tables.get("linear_regression_coefficients") is not None:
             st.markdown("**Linear regression coefficients**")
-            st.dataframe(tables["linear_regression_coefficients"], use_container_width=True)
+            st.dataframe(tables["linear_regression_coefficients"].rename(columns=_display_column_name), use_container_width=True)
         if tables.get("logistic_regression_coefficients") is not None:
             st.markdown("**Logistic regression coefficients**")
-            st.dataframe(tables["logistic_regression_coefficients"], use_container_width=True)
+            st.dataframe(tables["logistic_regression_coefficients"].rename(columns=_display_column_name), use_container_width=True)
 
     st.subheader("Unsupervised learning summary")
     cluster_summary = tables.get("unsupervised_cluster_summary")
@@ -1976,23 +2109,21 @@ def _render_tab_models(output_dir, model_tables):
     else:
         if cluster_summary is not None:
             st.markdown("**Cluster composition**")
-            st.dataframe(cluster_summary, use_container_width=True)
+            st.dataframe(cluster_summary.rename(columns=_display_column_name), use_container_width=True)
         if pca_variance is not None:
             st.markdown("**PCA explained variance**")
-            st.dataframe(pca_variance, use_container_width=True)
+            st.dataframe(pca_variance.rename(columns=_display_column_name), use_container_width=True)
         if tables.get("unsupervised_pca_loadings") is not None:
             st.markdown("**PCA loadings**")
-            st.dataframe(tables["unsupervised_pca_loadings"], use_container_width=True)
+            st.dataframe(tables["unsupervised_pca_loadings"].rename(columns=_display_column_name), use_container_width=True)
         if tables.get("unsupervised_assignments") is not None:
             st.markdown("**Sample assignments (preview)**")
-            st.dataframe(
-                tables["unsupervised_assignments"].head(20),
-                use_container_width=True,
-            )
+            assignments_display = _prepare_display_dataframe(tables["unsupervised_assignments"].head(20))
+            st.dataframe(assignments_display.rename(columns=_display_column_name), use_container_width=True)
 
 
 
-def _render_tab_distribution(filtered_df):
+def _render_tab_distribution(filtered_df, show_titles=True):
     """Render case distribution statistics with interactive bar charts."""
     st.subheader("Case Distribution Analysis")
     
@@ -2027,19 +2158,19 @@ def _render_tab_distribution(filtered_df):
         exposure_counts = display_df["exposure"].value_counts().reset_index()
         exposure_counts.columns = ["Exposure", "Count"]
         exposure_counts["Percentage"] = (exposure_counts["Count"] / exposure_counts["Count"].sum() * 100).round(1)
-        
         # Map exposure colors using EXPOSURE_COLORS constant
+        exposure_counts["Exposure"] = exposure_counts["Exposure"].map(_display_exposure_name)
         color_map = {
-            "Phe": EXPOSURE_COLORS["Phe"]["primary"],
-            "Terf": EXPOSURE_COLORS["Terf"]["primary"],
-            "0": EXPOSURE_COLORS["0"]["primary"]
+            _display_exposure_name("Phe"): EXPOSURE_COLORS["Phe"]["primary"],
+            _display_exposure_name("Terf"): EXPOSURE_COLORS["Terf"]["primary"],
+            _display_exposure_name("0"): EXPOSURE_COLORS["0"]["primary"]
         }
         
         fig1 = px.bar(
             exposure_counts,
             x="Exposure",
             y="Count",
-            title="Number of Cases by Exposure Type",
+            title=_plot_title_text("Number of Cases by Exposure Type", show_titles),
             color="Exposure",
             text="Count" if not show_percentages else exposure_counts.apply(
                 lambda row: f"{row['Count']} ({row['Percentage']:.1f}%)", axis=1
@@ -2075,7 +2206,7 @@ def _render_tab_distribution(filtered_df):
             conc_counts,
             x="Concentration",
             y="Count",
-            title="Number of Cases by Concentration Level",
+            title=_plot_title_text("Number of Cases by Concentration Level", show_titles),
             color="Count",
             text="Count" if not show_percentages else conc_counts.apply(
                 lambda row: f"{row['Count']} ({row['Percentage']:.1f}%)", axis=1
@@ -2096,13 +2227,14 @@ def _render_tab_distribution(filtered_df):
     if "exposure" in display_df.columns and "concentration" in display_df.columns:
         combo_counts = display_df.groupby(["exposure", "concentration"]).size().reset_index(name="Count")
         combo_counts["Percentage"] = (combo_counts["Count"] / combo_counts["Count"].sum() * 100).round(1)
+        combo_counts["Exposure"] = combo_counts["exposure"].map(_display_exposure_name)
         
         # Safely convert concentration to string
         try:
-            combo_counts["Label"] = combo_counts["exposure"] + "_" + combo_counts["concentration"].astype(str)
+            combo_counts["Label"] = combo_counts["Exposure"] + "_" + combo_counts["concentration"].astype(str)
         except Exception as e:
             st.warning(f"Could not create labels: {e}")
-            combo_counts["Label"] = combo_counts["exposure"]
+            combo_counts["Label"] = combo_counts["Exposure"]
         
         # Sort by exposure then concentration
         try:
@@ -2114,17 +2246,17 @@ def _render_tab_distribution(filtered_df):
         
         # Use EXPOSURE_COLORS for consistent color coding
         color_map = {
-            "Phe": EXPOSURE_COLORS["Phe"]["primary"],
-            "Terf": EXPOSURE_COLORS["Terf"]["primary"],
-            "0": EXPOSURE_COLORS["0"]["primary"]
+            _display_exposure_name("Phe"): EXPOSURE_COLORS["Phe"]["primary"],
+            _display_exposure_name("Terf"): EXPOSURE_COLORS["Terf"]["primary"],
+            _display_exposure_name("0"): EXPOSURE_COLORS["0"]["primary"]
         }
         
         fig3 = px.bar(
             combo_counts,
             x="Label",
             y="Count",
-            title="Number of Cases by Exposure and Concentration",
-            color="exposure",
+            title=_plot_title_text("Number of Cases by Exposure and Concentration", show_titles),
+            color="Exposure",
             text="Count" if not show_percentages else combo_counts.apply(
                 lambda row: f"{row['Count']} ({row['Percentage']:.1f}%)", axis=1
             ),
@@ -2136,7 +2268,8 @@ def _render_tab_distribution(filtered_df):
         st.plotly_chart(fig3, use_container_width=True)
         
         with st.expander("Show data table"):
-            st.dataframe(combo_counts.drop("Label", axis=1), use_container_width=True)
+            combo_display = combo_counts.drop(columns=["exposure", "Label"], errors="ignore").copy()
+            st.dataframe(combo_display, use_container_width=True)
     else:
         st.info("Exposure and/or concentration columns not found in data")
     
@@ -2152,7 +2285,7 @@ def _render_tab_distribution(filtered_df):
             well_counts,
             x="Well",
             y="Count",
-            title="Number of Cases by Well",
+            title=_plot_title_text("Number of Cases by Well", show_titles),
             color="Count",
             text="Count" if not show_percentages else well_counts.apply(
                 lambda row: f"{row['Count']} ({row['Percentage']:.1f}%)", axis=1
@@ -2180,7 +2313,7 @@ def _render_tab_distribution(filtered_df):
             arrhythmia_counts,
             x="Arrhythmia",
             y="Count",
-            title="Distribution of Arrhythmia Status",
+            title=_plot_title_text("Distribution of Arrhythmia Status", show_titles),
             color="Arrhythmia",
             text="Count" if not show_percentages else arrhythmia_counts.apply(
                 lambda row: f"{row['Count']} ({row['Percentage']:.1f}%)", axis=1
@@ -2201,22 +2334,23 @@ def _render_tab_distribution(filtered_df):
                 ("Total", "count"),
                 ("Arrhythmic", "sum"),
             ]).reset_index()
+            arrhythmia_by_exposure["exposure"] = arrhythmia_by_exposure["exposure"].map(_display_exposure_name)
             arrhythmia_by_exposure["Arrhythmia_Rate_%"] = (
                 arrhythmia_by_exposure["Arrhythmic"] / arrhythmia_by_exposure["Total"] * 100
             ).round(1)
             
             # Use EXPOSURE_COLORS for consistent color coding
             color_map = {
-                "Phe": EXPOSURE_COLORS["Phe"]["primary"],
-                "Terf": EXPOSURE_COLORS["Terf"]["primary"],
-                "0": EXPOSURE_COLORS["0"]["primary"]
+                _display_exposure_name("Phe"): EXPOSURE_COLORS["Phe"]["primary"],
+                _display_exposure_name("Terf"): EXPOSURE_COLORS["Terf"]["primary"],
+                _display_exposure_name("0"): EXPOSURE_COLORS["0"]["primary"]
             }
             
             fig6 = px.bar(
                 arrhythmia_by_exposure,
                 x="exposure",
                 y="Arrhythmia_Rate_%",
-                title="Arrhythmia Rate by Exposure Type (%)",
+                title=_plot_title_text("Arrhythmia Rate by Exposure Type (%)", show_titles),
                 color="exposure",
                 text="Arrhythmia_Rate_%",
                 labels={"exposure": "Exposure", "Arrhythmia_Rate_%": "Arrhythmia Rate (%)"},
@@ -2252,7 +2386,7 @@ def _render_tab_distribution(filtered_df):
                 arrhythmia_by_conc,
                 x="concentration",
                 y="Arrhythmia_Rate_%",
-                title="Arrhythmia Rate by Concentration Level (%)",
+                title=_plot_title_text("Arrhythmia Rate by Concentration Level (%)", show_titles),
                 color="Arrhythmia_Rate_%",
                 text="Arrhythmia_Rate_%",
                 labels={"concentration": "Concentration", "Arrhythmia_Rate_%": "Arrhythmia Rate (%)"},
@@ -2282,7 +2416,7 @@ def _render_tab_distribution(filtered_df):
 
 
 
-def _render_tab_waveform_overlay(record_by_sample, all_samples):
+def _render_tab_waveform_overlay(record_by_sample, all_samples, show_titles=True):
     """Render tab for overlaying contraction waveforms from selected samples with alignment and detrending."""
     st.subheader("Waveform Overlay Utility")
     st.markdown(
@@ -2299,6 +2433,7 @@ def _render_tab_waveform_overlay(record_by_sample, all_samples):
         "Select samples to overlay",
         options=sorted(all_samples),
         default=[],
+        format_func=_display_sample_name,
         help="Choose multiple samples to compare their contraction waveforms"
     )
     
@@ -2324,7 +2459,7 @@ def _render_tab_waveform_overlay(record_by_sample, all_samples):
         # Color picker for this sample
         with col:
             sample_color = st.color_picker(
-                f"{sample_id}",
+                f"{_display_sample_name(sample_id)}",
                 value=default_color,
                 key=f"waveform_color_{sample_id}"
             )
@@ -2356,7 +2491,7 @@ def _render_tab_waveform_overlay(record_by_sample, all_samples):
     
     for sample_id in selected_samples:
         if sample_id not in record_by_sample:
-            st.warning(f"Sample {sample_id} not found in loaded data.")
+            st.warning(f"Sample {_display_sample_name(sample_id)} not found in loaded data.")
             continue
             
         record = record_by_sample[sample_id]
@@ -2365,7 +2500,7 @@ def _render_tab_waveform_overlay(record_by_sample, all_samples):
         peak_indices = np.asarray(record.get("peak_indices", []), dtype=int)
         
         if len(time_ms) < 2 or len(contraction_values) < 2:
-            st.warning(f"Insufficient data for sample {sample_id}")
+            st.warning(f"Insufficient data for sample {_display_sample_name(sample_id)}")
             continue
         
         # Use custom color from color picker
@@ -2402,8 +2537,8 @@ def _render_tab_waveform_overlay(record_by_sample, all_samples):
         
         # Collect summary statistics
         summary_data.append({
-            "Sample": sample_id,
-            "Exposure": exposure if exposure else "N/A",
+            "Sample": _display_sample_name(sample_id),
+            "Exposure": _display_exposure_name(exposure) if exposure else "N/A",
             "Num Peaks": len(peak_indices),
             "Mean Amplitude": f"{np.mean(contraction_detrended):.2f}",
             "Std Amplitude": f"{np.std(contraction_detrended):.2f}",
@@ -2426,7 +2561,7 @@ def _render_tab_waveform_overlay(record_by_sample, all_samples):
     y_axis_label = "Detrended Contraction (a.u.)" if apply_detrend else "Contraction Amplitude (a.u.)"
     
     fig.update_layout(
-        title=title,
+        title=_plot_title_text(title, show_titles),
         xaxis_title=x_axis_label,
         yaxis_title=y_axis_label,
         hovermode='x unified',
@@ -2522,7 +2657,12 @@ def main():
         return
     
     exposures = sorted(summary_df["exposure"].unique().tolist())
-    selected_exposures = st.sidebar.multiselect("Exposure", exposures, default=exposures)
+    selected_exposures = st.sidebar.multiselect(
+        "Exposure",
+        exposures,
+        default=exposures,
+        format_func=_display_exposure_name,
+    )
 
     filtered_df = summary_df[summary_df["exposure"].isin(selected_exposures)].copy()
 
@@ -2567,6 +2707,7 @@ def main():
         removable_cases,
         default=default_excluded_cases,
         help="Exclude selected cases from all current dashboard plots and tables.",
+        format_func=_display_sample_name,
     )
     if excluded_cases:
         filtered_df = filtered_df[~filtered_df["sample"].isin(excluded_cases)].copy()
@@ -2580,7 +2721,7 @@ def main():
     logger.info(f"Applied filters - Exposures: {selected_exposures}, Concentrations: {selected_concentrations}, Final samples: {len(filtered_df)}")
 
     sample_options = filtered_df["sample"].tolist()
-    selected_sample = st.sidebar.selectbox("Fish sample", sample_options)
+    selected_sample = st.sidebar.selectbox("Fish sample", sample_options, format_func=_display_sample_name)
     
     # GroupBy Exposure toggle
     st.sidebar.markdown("---")
@@ -2588,7 +2729,12 @@ def main():
     group_by_exposure = st.sidebar.checkbox(
         "Group by Exposure",
         value=False,
-        help="When enabled, show separate side-by-side graphs for each exposure (Phe and Terf)"
+        help="When enabled, show separate side-by-side graphs for each exposure (Phenanthrene and Terfenadine)"
+    )
+    show_titles = not st.sidebar.checkbox(
+        "Hide plot titles",
+        value=False,
+        help="When enabled, hide titles on graph images and charts."
     )
     
     # Color Settings
@@ -2699,7 +2845,7 @@ def main():
         col7, col8, col9 = st.columns(3)
         with col7:
             new_phe_color = st.color_picker(
-                "Phe Exposure",
+                "Phenanthrene Exposure",
                 color_config.exposure_colors["Phe"]["primary"],
                 key="phe_exposure_color_picker"
             )
@@ -2708,7 +2854,7 @@ def main():
         
         with col8:
             new_terf_color = st.color_picker(
-                "Terf Exposure",
+                "Terfenadine Exposure",
                 color_config.exposure_colors["Terf"]["primary"],
                 key="terf_exposure_color_picker"
             )
@@ -2795,29 +2941,35 @@ def main():
     if "fish" in tab_by_key:
         with tab_by_key["fish"]:
             logger.debug("Rendering Fish tab")
-            _render_tab_fish(selected_sample, record_by_sample)
+            _render_tab_fish(selected_sample, record_by_sample, show_titles=show_titles)
 
     if "dose" in tab_by_key:
         with tab_by_key["dose"]:
             logger.debug(f"Rendering Dose Profile tab (group_by_exposure={group_by_exposure})")
-            _render_tab_dose(filtered_records, group_by_exposure=group_by_exposure)
+            _render_tab_dose(filtered_records, group_by_exposure=group_by_exposure, show_titles=show_titles)
 
     if "hrv" in tab_by_key:
         with tab_by_key["hrv"]:
             logger.debug(f"Rendering HRV Over Time tab (group_by_exposure={group_by_exposure})")
-            _render_tab_hrv(filtered_records, group_by_exposure=group_by_exposure)
+            _render_tab_hrv(filtered_records, group_by_exposure=group_by_exposure, show_titles=show_titles)
             
     if "amplitude" in tab_by_key:
         with tab_by_key["amplitude"]:
-            _render_tab_contraction_amplitude(filtered_df, group_by_exposure=group_by_exposure)
+            _render_tab_contraction_amplitude(filtered_df, group_by_exposure=group_by_exposure, show_titles=show_titles)
             
     if "force" in tab_by_key:
         with tab_by_key["force"]:
-            _render_tab_contraction_force(filtered_df, selected_sample, record_by_sample, group_by_exposure=group_by_exposure)
+            _render_tab_contraction_force(
+                filtered_df,
+                selected_sample,
+                record_by_sample,
+                group_by_exposure=group_by_exposure,
+                show_titles=show_titles,
+            )
             
     if "transients" in tab_by_key:
         with tab_by_key["transients"]:
-            _render_tab_transients(filtered_df, group_by_exposure=group_by_exposure)
+            _render_tab_transients(filtered_df, group_by_exposure=group_by_exposure, show_titles=show_titles)
 
     if "data_table" in tab_by_key:
         with tab_by_key["data_table"]:
@@ -2831,18 +2983,18 @@ def main():
     if "graphs" in tab_by_key:
         with tab_by_key["graphs"]:
             logger.debug(f"Rendering Graphs tab (group_by_exposure={group_by_exposure})")
-            _render_tab_graphs(filtered_df, group_by_exposure=group_by_exposure)
+            _render_tab_graphs(filtered_df, group_by_exposure=group_by_exposure, show_titles=show_titles)
 
     if "distribution" in tab_by_key:
         with tab_by_key["distribution"]:
             logger.debug("Rendering Distribution tab")
-            _render_tab_distribution(filtered_df)
+            _render_tab_distribution(filtered_df, show_titles=show_titles)
 
     if "waveform_overlay" in tab_by_key:
         with tab_by_key["waveform_overlay"]:
             logger.debug("Rendering Waveform Overlay tab")
             all_samples = list(record_by_sample.keys())
-            _render_tab_waveform_overlay(record_by_sample, all_samples)
+            _render_tab_waveform_overlay(record_by_sample, all_samples, show_titles=show_titles)
 
     if "models" in tab_by_key:
         with tab_by_key["models"]:
